@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+log/
+build/
+install/
+
+.claude
+.codex
+.agent
