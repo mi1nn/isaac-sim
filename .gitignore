@@ -232,3 +232,22 @@ install/
 .claude
 .codex
 .agent
+
+# Ruflo local secrets and runtime data
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Codex local configuration
+.codex/
+# Claude Flow runtime data
+# Environment variables
+.agents/
+.claude-flow/
+.serena/
+.swarm/
+AGENTS.md
+CLAUDE.md
+ruvector.db
