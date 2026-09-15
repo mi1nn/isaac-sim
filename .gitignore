@@ -200,10 +200,14 @@ cython_debug/
 #   and can be added to the global gitignore or merged into this file. However, if you prefer, 
 #   you could uncomment the following to ignore the entire vscode folder
 <<<<<<< HEAD
+<<<<<<< HEAD
 .vscode/
 =======
 # .vscode/
 >>>>>>> origin/main
+=======
+# .vscode/
+>>>>>>> 6a9de8274cac459da5a21c1b77f1085944ee9516
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
