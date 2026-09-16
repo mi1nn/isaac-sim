@@ -199,15 +199,7 @@ cython_debug/
 #   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
 #   and can be added to the global gitignore or merged into this file. However, if you prefer, 
 #   you could uncomment the following to ignore the entire vscode folder
-<<<<<<< HEAD
-<<<<<<< HEAD
 .vscode/
-=======
-# .vscode/
->>>>>>> origin/main
-=======
-# .vscode/
->>>>>>> 6a9de8274cac459da5a21c1b77f1085944ee9516
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
@@ -232,3 +224,22 @@ install/
 .claude
 .codex
 .agent
+
+# Ruflo local secrets and runtime data
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Codex local configuration
+.codex/
+# Claude Flow runtime data
+# Environment variables
+.agents/
+.claude-flow/
+.serena/
+.swarm/
+AGENTS.md
+CLAUDE.md
+ruvector.db
