@@ -27,12 +27,12 @@ from srb.core.sensor import ContactSensor, ContactSensorCfg
 from srb.core.sim import (
     CollisionPropertiesCfg,
     MassPropertiesCfg,
+    MeshCollisionPropertiesCfg,
     RigidBodyPropertiesCfg,
     UsdFileCfg,
 )
 from srb.utils.cfg import configclass
 from srb.utils.math import (
-    deg_to_rad,
     matrix_from_quat,
     rotmat_to_rot6d,
     rpy_to_quat,
@@ -79,29 +79,39 @@ class SceneCfg(ManipulationSceneCfg):
 
 @configclass
 class EventCfg(ManipulationEventCfg):
+    ## NOTE: Ranges are zeroed for manual grasp testing: the debris is placed at
+    ## its configured `init_state` pose with zero linear/angular velocity, so it
+    ## starts at rest without being made kinematic -- it is still a fully dynamic
+    ## rigid body that reacts to gripper contact. Restore the randomization
+    ## (see git history for the original ranges) before training.
     randomize_obj_state: EventTermCfg = EventTermCfg(
         func=reset_root_state_uniform,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("debris"),
             "pose_range": {
-                "x": (-0.25, 0.25),
-                "y": (-0.25, 0.25),
-                "z": (-0.25, 0.25),
-                "roll": (-torch.pi, torch.pi),
-                "pitch": (-torch.pi, torch.pi),
-                "yaw": (-torch.pi, torch.pi),
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
             },
             "velocity_range": {
-                "x": (-0.2 - 0.05, -0.2 + 0.05),
-                "y": (-0.05, 0.05),
-                "z": (-0.05, 0.05),
-                "roll": (-deg_to_rad(10.0), deg_to_rad(10.0)),
-                "pitch": (-deg_to_rad(10.0), deg_to_rad(10.0)),
-                "yaw": (-deg_to_rad(10.0), deg_to_rad(10.0)),
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
             },
         },
     )
+
+    ## NOTE: The manipulation base class randomizes the arm joints by +-5 deg on
+    ## every reset. Disabled so the arm always starts at the exact joint pose
+    ## configured in `Canadarm3.asset_cfg.init_state`.
+    randomize_robot_joints: EventTermCfg | None = None
 
 
 @configclass
@@ -146,6 +156,13 @@ class TaskCfg(ManipulationEnvCfg):
                 usd_path=SRB_ASSETS_DIR_SPACE.joinpath("debris_v3.usd").as_posix(),
                 scale=(1.5, 1.5, 1.5),
                 collision_props=CollisionPropertiesCfg(),
+                ## NOTE: None of the mep USD layers author a mesh collision
+                ## approximation, so PhysX would fall back to convexHull and turn
+                ## the gripper_fixture handle into a solid blob the fingers cannot
+                ## reach into. Decomposing it is what makes the handle graspable.
+                mesh_collision_props=MeshCollisionPropertiesCfg(
+                    mesh_approximation="convexDecomposition"
+                ),
                 rigid_props=RigidBodyPropertiesCfg(),
                 mass_props=MassPropertiesCfg(density=1000.0),
                 activate_contact_sensors=True,
@@ -153,6 +170,8 @@ class TaskCfg(ManipulationEnvCfg):
             init_state=RigidObjectCfg.InitialStateCfg(
                 pos=(-0.105728, 13.90236, 11.82852),
                 rot=(0.095277, -0.700659, 0.095277, -0.700659),
+                lin_vel=(0.0, 0.0, 0.0),
+                ang_vel=(0.0, 0.0, 0.0),
             ),
         )
 

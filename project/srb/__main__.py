@@ -63,6 +63,7 @@ def run_agent(
     agent_subcommand: Literal[
         "zero",
         "rand",
+        "manual",
         "teleop",
         "ros",
         "train",
@@ -87,6 +88,7 @@ def run_agent_with_env(
     agent_subcommand: Literal[
         "zero",
         "rand",
+        "manual",
         "teleop",
         "ros",
         "train",
@@ -235,6 +237,7 @@ def run_agent_with_env(
 
         # Add keyboard callbacks
         if not headless and agent_subcommand not in [
+            "manual",
             "teleop",
             "collect",
             "train",
@@ -304,6 +307,8 @@ def run_agent_with_env(
                     zero_agent(**kwargs)
                 case "rand":
                     random_agent(**kwargs)
+                case "manual":
+                    manual_agent(headless=headless, **kwargs)
                 case "teleop":
                     teleop_agent(headless=headless, **kwargs)
                 case "ros":
@@ -373,6 +378,67 @@ def zero_agent(
                 f"truncated: {truncated}\n"
                 f"info: {info}\n"
             )
+
+
+def manual_agent(
+    env: "AnyEnv",
+    sim_app: "SimulationApp",
+    headless: bool,
+    joint_step: float,
+    autoplay: bool,
+    **kwargs,
+):
+    """Drive the manipulator joint-by-joint from the keyboard.
+
+    Unlike the other agents, this one never calls `env.step()`. It steps the
+    simulation directly so that no action term, reward, termination or reset is
+    evaluated: the robot holds its configured initial pose and moves only in
+    response to a key press.
+    """
+    import torch
+
+    from srb.interfaces.manual import ManualJointControlInterface
+
+    if headless:
+        raise ValueError(
+            'Manual control requires the GUI. Remove the "--headless" flag.'
+        )
+
+    unwrapped = env.unwrapped  # type: ignore
+    sim = unwrapped.sim
+    scene = unwrapped.scene
+
+    controller = ManualJointControlInterface(env, joint_step_deg=joint_step)
+
+    def cb_reset():
+        env.reset()
+        controller.sync_to_default()
+
+    controller.add_callback("L", cb_reset)
+    print(controller)
+
+    if not autoplay:
+        sim.pause()
+        print(
+            "[manual] simulation is PAUSED - inspect the scene, then press Play "
+            "in the Isaac Sim toolbar (or SPACE) to start stepping physics"
+        )
+
+    physics_dt = sim.get_physics_dt()
+    render_interval = max(1, unwrapped.cfg.sim.render_interval)
+    step_counter = 0
+    with torch.no_grad():
+        while sim_app.is_running():
+            if not sim.is_playing():
+                sim.render()
+                continue
+            controller.apply()
+            scene.write_data_to_sim()
+            sim.step(render=False)
+            step_counter += 1
+            if step_counter % render_interval == 0:
+                sim.render()
+            scene.update(dt=physics_dt)
 
 
 def teleop_agent(
@@ -1854,6 +1920,11 @@ def parse_cli_args() -> argparse.Namespace:
         help="Agent with random actions",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    manual_agent_parser = agent_subparsers.add_parser(
+        "manual",
+        help="Manual joint-level control of the robot from the keyboard",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     teleop_agent_parser = agent_subparsers.add_parser(
         "teleop",
         help="Teleoperate agent",
@@ -1887,6 +1958,7 @@ def parse_cli_args() -> argparse.Namespace:
     agent_parsers_with_env = (
         zero_agent_parser,
         rand_agent_parser,
+        manual_agent_parser,
         teleop_agent_parser,
         ros_agent_parser,
         train_agent_parser,
@@ -2188,6 +2260,21 @@ def parse_cli_args() -> argparse.Namespace:
             type=str,
             default=SRB_LOGS_DIR,
         )
+
+    ## Manual control args
+    manual_group = manual_agent_parser.add_argument_group("Manual control")
+    manual_group.add_argument(
+        "--joint_step",
+        help="Angle increment per key press for the selected joint, in degrees",
+        type=float,
+        default=1.0,
+    )
+    manual_group.add_argument(
+        "--autoplay",
+        help="Start stepping physics immediately instead of waiting for the user to press Play",
+        action="store_true",
+        default=False,
+    )
 
     ## Teleop args
     for _parser in (
