@@ -52,7 +52,7 @@ from .asset import select_debris
 class SceneCfg(ManipulationSceneCfg):
     debris: RigidObjectCfg = MISSING  # type: ignore
 
-    ## Custom assets (dynamic rigid bodies, spaced along X so nothing overlaps)
+    ## Custom assets (dynamic rigid bodies)
     ## NOTE: mep.usd bundles 3 sub-objects (Ares1 rocket, Fermi telescope,
     ## gripper_fixture) meant to move/collide together as ONE object. Isaac Lab's
     ## rigid-body resolution otherwise tags each sub-object separately (since the
@@ -60,8 +60,8 @@ class SceneCfg(ManipulationSceneCfg):
     ## wrapper that pre-applies a single RigidBodyAPI on the combined root and
     ## CollisionAPI on all 52 of its mesh/shape prims -> the trio spawns and moves
     ## as one rigid body made of many collision shapes.
-    ## mep_combined.usd's internal origin also sits far from its own geometry, so
-    ## its pos below compensates for that offset to land the mesh at world (-8, 0, 0).
+    ## pos/rot/scale below were taken from ~/Downloads/3asset_v1.usd (manually
+    ## placed & scaled by hand-placing the assets in a plain Isaac Sim session).
     mep: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/mep",
         spawn=UsdFileCfg(
@@ -70,17 +70,24 @@ class SceneCfg(ManipulationSceneCfg):
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(-57.98, -17.86, 0.053)),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.472, 11.345, 8.624),
+            rot=(0.095277, -0.700659, 0.095277, -0.700659),
+        ),
     )
     satellite: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/satellite",
         spawn=UsdFileCfg(
             usd_path=SRB_ASSETS_DIR_SPACE.joinpath("satellite.usd").as_posix(),
+            scale=(1.5, 1.5, 1.5),
             collision_props=CollisionPropertiesCfg(),
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(8.33, 3.31, -3.35)),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(3.356, 17.287, 12.943),
+            rot=(0.707107, 0.707107, 0.0, 0.0),
+        ),
     )
 
 
