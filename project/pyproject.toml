@@ -1,0 +1,162 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+
+[project]
+name = "srb"
+version = "0.0.6"
+description = "Robot Learning Beyond Earth"
+authors = [{ name = "Andrej Orsula", email = "orsula.andrej@gmail.com" }]
+maintainers = [{ name = "Andrej Orsula", email = "orsula.andrej@gmail.com" }]
+urls = { Repository = "https://github.com/AndrejOrsula/space_robotics_bench", Documentation = "https://AndrejOrsula.github.io/space_robotics_bench" }
+classifiers = [
+  "Programming Language :: Python",
+  "Programming Language :: Rust",
+  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
+  "Framework :: Robot Framework",
+]
+keywords = ["benchmark", "robotics", "simulation", "space"]
+license = { text = "MIT OR Apache-2.0" }
+requires-python = "==3.11.*"
+dependencies = [
+  ## Core
+  "gymnasium~=0.29",
+  # "isaaclab~=2.0",
+  "oxidasim~=0.1",
+  ## Assets
+  "simforge[assets]~=0.2",
+  ## Typing
+  "pydantic~=2.0",
+  ## Serialization
+  "orjson~=3.10",
+]
+
+[project.optional-dependencies]
+all = [
+  ## Algorithms
+  "srb[algo]",
+  ## Hardware
+  "srb[hw]",
+  ## Logging
+  "srb[logging]",
+  ## Utils
+  "srb[cli]",
+  "srb[dev]",
+]
+## Algorithms
+algo = [
+  #
+  "srb[dreamer]",
+  "srb[sb3]",
+  "srb[sbx]",
+  "srb[skrl]",
+  "srb[robomimic]",
+]
+dreamer = [
+  #
+  # Note: Only editable install of dreamer works for now (circular import of  partially initialized module included with sys.path)
+  # TODO[mid]: Fix Dreamer install (fork and fix recursive import)
+  # "dreamer@git+https://github.com/AndrejOrsula/dreamerv3.git@4049794d4135e41c691f18da38a9af7541b01553",
+  # Note: jax==0.5.1 causes issues
+  "jax~=0.4,<0.5.1",
+]
+sb3 = [
+  #
+  "stable-baselines3~=2.4",
+  "sb3-contrib~=2.4",
+  # Note: The fork relaxes the dependency for gymnasium (shimmy requires gymnasium>=1.0)
+  # "rl_zoo3@git+https://github.com/AndrejOrsula/rl-baselines3-zoo.git@e04921b4ccbadbc9f6bcc46cc1787ffc1d2c8963",
+]
+sbx = [
+  #
+  "sbx-rl~=0.19",
+  "tf_keras~=2.0",
+]
+skrl = [
+  #
+  "skrl~=1.0",
+]
+robomimic = [
+  #
+  # "robomimic@git+https://github.com/ARISE-Initiative/robomimic.git@TODO",
+]
+## Hardware
+hw = [
+  #
+  "srb[spacemouse]",
+]
+spacemouse = [
+  #
+  "pyspacemouse~=1.0",
+]
+## Logging
+logging = [
+  #
+  "srb[wandb]",
+  "srb[tensorboard]",
+]
+wandb = [
+  #
+  "wandb~=0.19",
+]
+tensorboard = [
+  #
+  "tensorboard~=2.0",
+  "tensorflow~=2.0",
+]
+## Utils
+cli = [
+  #
+  "srb[rich]",
+  "srb[repl]",
+  "argcomplete~=3.0",
+  "hydra-core~=1.0",
+  "omegaconf~=2.0",
+]
+dev = [
+  #
+  "srb[test]",
+  "srb[tracing]",
+  "srb[typing]",
+  "srb[plots]",
+]
+rich = [
+  #
+  "rich~=14.0",
+]
+test = [
+  #
+  "pytest~=8.0",
+  "pytest-order~=1.0",
+  "pytest-sugar~=1.0",
+]
+tracing = [
+  #
+  "srb[rich]",
+  "logfire~=4.0",
+]
+typing = [
+  #
+  "mypy~=1.0",
+  "types-psutil~=7.0",
+  "types-PyYAML~=6.0",
+  "types-toml~=0.10",
+]
+repl = [
+  #
+  "ptpython~=3.0",
+]
+plots = [
+  #
+  "seaborn~=0.13",
+]
+
+
+[project.scripts]
+space_robotics_bench = "srb.__main__:main"
+srb = "srb.__main__:main"

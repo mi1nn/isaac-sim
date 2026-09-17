@@ -34,7 +34,7 @@ SRB documentation with detailed installation instructions, usage guides, and dev
 
 ## License
 
-This project is dual-licensed under either the [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE) licenses.
+This project is dual-licensed under either the [MIT](project/LICENSE-MIT) or [Apache 2.0](project/LICENSE-APACHE) licenses.
 
 All assets created by contributors of this repository and those generated from [SimForge](https://github.com/AndrejOrsula/simforge) procedural pipelines are licensed under the [CC0 1.0 Universal](https://github.com/AndrejOrsula/srb_assets/blob/main/LICENSE-CC0) license. Resources from third-party sources are listed under [attributions](https://andrejorsula.github.io/space_robotics_bench/misc/attributions.html).
 
