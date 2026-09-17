@@ -243,3 +243,5 @@ install/
 AGENTS.md
 CLAUDE.md
 ruvector.db
+
+space_robotics_bench/.docker/.history/

@@ -1,0 +1,35 @@
+[package]
+title = "Space Robotics Bench | Rendering"
+description = "Experience with rendering support for the Space Robotics Bench"
+version = "0.0.1"
+keywords = ["benchmark", "robotics", "simulation", "space"]
+
+
+[dependencies]
+## Rendering
+"omni.replicator.core" = {}
+"omni.rtx.settings.core" = {}
+
+## Inheritance
+"srb" = {}
+
+
+[settings]
+## Extensions
+app.exts.folders = [
+    "${app}",
+    "${exe-path}/exts",
+    "${exe-path}/extscore",
+    "${exe-path}/../exts",
+    "${exe-path}/../extscache",
+    "${exe-path}/../extsPhysics",
+    "${exe-path}/../isaacsim/exts",
+    "${exe-path}/../isaacsim/extscache",
+    "${exe-path}/../isaacsim/extsPhysics",
+]
+
+## Rendering
+isaaclab.cameras_enabled = true
+rtx.raytracing.cached.enabled = false
+rtx.raytracing.lightcache.spatialCache.enabled = false
+rtx.descriptorSets = 30000 # Note: Increase for scenes with more cameras

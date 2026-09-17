@@ -1,0 +1,1973 @@
+env:
+  viewer:
+    eye:
+    - 1.85
+    - 0.0
+    - 1.85
+    lookat:
+    - 0.125
+    - 0.0
+    - 0.25
+    cam_prim_path: /OmniverseKit_Persp
+    resolution:
+    - 1280
+    - 720
+    origin_type: env
+    env_index: 0
+    asset_name: null
+    body_name: null
+  sim:
+    physics_prim_path: /physicsScene
+    device: cpu
+    dt: 0.006666666666666667
+    render_interval: 3
+    gravity:
+    - 0.0
+    - 0.0
+    - -3.72076
+    enable_scene_query_support: false
+    use_fabric: true
+    physx:
+      solver_type: 1
+      min_position_iteration_count: 2
+      max_position_iteration_count: 255
+      min_velocity_iteration_count: 1
+      max_velocity_iteration_count: 255
+      enable_ccd: true
+      enable_stabilization: false
+      enable_enhanced_determinism: false
+      bounce_threshold_velocity: 0.0
+      friction_offset_threshold: 0.01
+      friction_correlation_distance: 0.005
+      gpu_max_rigid_contact_count: 8192
+      gpu_max_rigid_patch_count: 4096
+      gpu_found_lost_pairs_capacity: 131072
+      gpu_found_lost_aggregate_pairs_capacity: 65536
+      gpu_total_aggregate_pairs_capacity: 4096
+      gpu_collision_stack_size: 8388608
+      gpu_heap_capacity: 524288
+      gpu_temp_buffer_capacity: 65536
+      gpu_max_num_partitions: 1
+      gpu_max_soft_body_contacts: 1048576
+      gpu_max_particle_contacts: 4194304
+    physics_material:
+      func: isaaclab.sim.spawners.materials.physics_materials:spawn_rigid_body_material
+      static_friction: 1.0
+      dynamic_friction: 1.0
+      restitution: 0.0
+      friction_combine_mode: multiply
+      restitution_combine_mode: multiply
+      compliant_contact_stiffness: 0.0
+      compliant_contact_damping: 0.0
+    render:
+      enable_translucency: true
+      enable_reflections: true
+      enable_global_illumination: null
+      antialiasing_mode: null
+      enable_dlssg: null
+      enable_dl_denoiser: null
+      dlss_mode: null
+      enable_direct_lighting: null
+      samples_per_pixel: null
+      enable_shadows: null
+      enable_ambient_occlusion: null
+      carb_settings: null
+      rendering_mode: null
+    create_stage_in_memory: false
+  ui_window_class_type: null
+  seed: 0
+  decimation: 3
+  is_finite_horizon: true
+  episode_length_s: 7.5
+  scene:
+    num_envs: 1
+    env_spacing: 4.0
+    lazy_sensor_update: true
+    replicate_physics: false
+    filter_collisions: true
+    clone_in_fabric: false
+    sunlight:
+      class_type: null
+      prim_path: /World/sunlight
+      spawn:
+        func: isaaclab.sim.spawners.lights.lights:spawn_light
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        prim_type: DistantLight
+        color:
+        - 1.0
+        - 1.0
+        - 1.0
+        enable_color_temperature: true
+        color_temperature: 6250.0
+        normalize: false
+        exposure: 0.0
+        intensity: 729
+        angle: 0.35
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 0.8923991008325228
+        - 0.3696438106143861
+        - 0.23911761839433449
+        - -0.09904576054128762
+      collision_group: 0
+      debug_vis: false
+    skydome:
+      class_type: null
+      prim_path: /World/skydome
+      spawn:
+        func: isaaclab.sim.spawners.lights.lights:spawn_light
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        prim_type: DomeLight
+        color:
+        - 1.0
+        - 1.0
+        - 1.0
+        enable_color_temperature: false
+        color_temperature: 6500.0
+        normalize: false
+        exposure: 0.0
+        intensity: 182.25
+        texture_file: /root/ws/assets/srb_assets/skydome/low_res/mars_sky.exr
+        texture_format: automatic
+        visible_in_primary_ray: true
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+      collision_group: 0
+      debug_vis: false
+    scenery:
+      class_type: null
+      prim_path: '{ENV_REGEX_NS}/scenery'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.simforge_asset.impl:spawn_simforge_assets
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        deformable_props: null
+        rigid_props: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: null
+          rest_offset: null
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: false
+        scale: null
+        articulation_props: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        mesh_collision_props: null
+        physics_material: null
+        assets:
+        - geo:
+            ops:
+            - nodes:
+                name: MarsSurface
+                python_file: !!python/object/apply:pathlib.PosixPath
+                - /
+                - root
+                - simforge_foundry
+                - simforge_foundry
+                - geometry
+                - terrain
+                - mars_surface
+                - nodes.py
+              scale:
+              - 4.0
+              - 4.0
+              - 0.4
+              density: 0.04
+              flat_area_size: 1.8379173679952558
+              rock_mesh_boolean_enable: false
+              mat: null
+          mat:
+            shader:
+              nodes:
+                name: MarsSurfaceShader
+                python_file: !!python/object/apply:pathlib.PosixPath
+                - /
+                - root
+                - simforge_foundry
+                - simforge_foundry
+                - material
+                - natural
+                - mars_surface
+                - nodes.py
+          texture_resolution:
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "ALBEDO"}': 2048
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "EMISSION"}': 256
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "METALLIC"}': 512
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "NORMAL"}': 2048
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "ROUGHNESS"}': 1024
+        export_kwargs: {}
+        num_assets: 1
+        seed: 0
+        use_cache: true
+        random_choice: false
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+      collision_group: 0
+      debug_vis: false
+    robot:
+      class_type: isaaclab.assets.articulation.articulation:Articulation
+      prim_path: '{ENV_REGEX_NS}/robot'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        deformable_props: null
+        rigid_props:
+          rigid_body_enabled: null
+          kinematic_enabled: null
+          disable_gravity: true
+          linear_damping: null
+          angular_damping: null
+          max_linear_velocity: null
+          max_angular_velocity: null
+          max_depenetration_velocity: 5.0
+          max_contact_impulse: null
+          enable_gyroscopic_forces: null
+          retain_accelerations: null
+          solver_position_iteration_count: null
+          solver_velocity_iteration_count: null
+          sleep_threshold: null
+          stabilization_threshold: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: 0.005
+          rest_offset: 0.0
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: true
+        scale: null
+        articulation_props:
+          articulation_enabled: null
+          enabled_self_collisions: false
+          solver_position_iteration_count: 12
+          solver_velocity_iteration_count: 1
+          sleep_threshold: null
+          stabilization_threshold: null
+          fix_root_link: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        usd_path: /root/ws/assets/srb_assets/robot/manipulator/franka_arm.usdz
+        variants: null
+        mesh_collision_props:
+          func: simforge.integrations.isaaclab.schemas.impl:set_mesh_collision_properties
+          mesh_approximation: convexDecomposition
+          sdf_resolution: 128
+        physics_material: null
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.25
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        lin_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        ang_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        joint_pos:
+          panda_joint1: 0.0
+          panda_joint2: 0.0
+          panda_joint3: 0.0
+          panda_joint4: -1.5707963267948966
+          panda_joint5: 0.0
+          panda_joint6: 1.5707963267948966
+          panda_joint7: 0.7853981633974483
+        joint_vel:
+          .*: 0.0
+      collision_group: 0
+      debug_vis: false
+      articulation_root_prim_path: null
+      soft_joint_pos_limit_factor: 1.0
+      actuators:
+        panda_shoulder:
+          class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+          joint_names_expr:
+          - panda_joint[1-4]
+          effort_limit: 87.0
+          velocity_limit: 2.175
+          effort_limit_sim: null
+          velocity_limit_sim: null
+          stiffness: 4000.0
+          damping: 800.0
+          armature: null
+          friction: null
+          dynamic_friction: null
+          viscous_friction: null
+        panda_forearm:
+          class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+          joint_names_expr:
+          - panda_joint[5-7]
+          effort_limit: 12.0
+          velocity_limit: 2.61
+          effort_limit_sim: null
+          velocity_limit_sim: null
+          stiffness: 4000.0
+          damping: 800.0
+          armature: null
+          friction: null
+          dynamic_friction: null
+          viscous_friction: null
+      actuator_value_resolution_debug_print: false
+    payload: null
+    manipulator: null
+    end_effector:
+      class_type: isaaclab.assets.articulation.articulation:Articulation
+      prim_path: '{ENV_REGEX_NS}/end_effector'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        deformable_props: null
+        rigid_props:
+          rigid_body_enabled: null
+          kinematic_enabled: null
+          disable_gravity: true
+          linear_damping: null
+          angular_damping: null
+          max_linear_velocity: null
+          max_angular_velocity: null
+          max_depenetration_velocity: 5.0
+          max_contact_impulse: null
+          enable_gyroscopic_forces: null
+          retain_accelerations: null
+          solver_position_iteration_count: null
+          solver_velocity_iteration_count: null
+          sleep_threshold: null
+          stabilization_threshold: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: 0.005
+          rest_offset: 0.0
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: true
+        scale: null
+        articulation_props:
+          articulation_enabled: null
+          enabled_self_collisions: false
+          solver_position_iteration_count: 12
+          solver_velocity_iteration_count: 1
+          sleep_threshold: null
+          stabilization_threshold: null
+          fix_root_link: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        usd_path: /root/ws/assets/srb_assets/robot/gripper/franka_hand.usdz
+        variants: null
+        mesh_collision_props: null
+        physics_material: null
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.10700000077486038
+        rot:
+        - 0.9238795042037964
+        - 0.0
+        - 0.0
+        - -0.3826834261417389
+        lin_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        ang_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        joint_pos:
+          panda_finger_joint.*: 0.04
+        joint_vel:
+          .*: 0.0
+      collision_group: 0
+      debug_vis: false
+      articulation_root_prim_path: null
+      soft_joint_pos_limit_factor: 1.0
+      actuators:
+        panda_hand:
+          class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+          joint_names_expr:
+          - panda_finger_joint.*
+          effort_limit: 200.0
+          velocity_limit: 0.2
+          effort_limit_sim: null
+          velocity_limit_sim: null
+          stiffness: 2000.0
+          damping: 250.0
+          armature: null
+          friction: null
+          dynamic_friction: null
+          viscous_friction: null
+      actuator_value_resolution_debug_print: false
+    pedestal:
+      class_type: null
+      prim_path: '{ENV_REGEX_NS}/pedestal'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        deformable_props: null
+        rigid_props: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: null
+          rest_offset: null
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: false
+        scale: null
+        articulation_props: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        usd_path: /root/ws/assets/srb_assets/object/industrial_pedestal_25cm.usdz
+        variants: null
+        mesh_collision_props: null
+        physics_material: null
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+      collision_group: 0
+      debug_vis: false
+    tf_end_effector:
+      class_type: isaaclab.sensors.frame_transformer.frame_transformer:FrameTransformer
+      prim_path: '{ENV_REGEX_NS}/robot/panda_link0'
+      update_period: 0.0
+      history_length: 0
+      debug_vis: false
+      source_frame_offset:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+      target_frames:
+      - prim_path: '{ENV_REGEX_NS}/robot/panda_link7'
+        name: robot_ee
+        offset:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.21040000021457672
+          rot:
+          - 0.9238795042037964
+          - 0.0
+          - 0.0
+          - -0.3826834261417389
+      visualizer_cfg:
+        prim_path: /Visuals/robot_ee
+        markers:
+          frame:
+            func: isaaclab.sim.spawners.from_files.from_files:spawn_from_usd
+            visible: true
+            semantic_tags: null
+            copy_from_source: true
+            mass_props: null
+            deformable_props: null
+            rigid_props: null
+            collision_props: null
+            activate_contact_sensors: false
+            scale:
+            - 0.025
+            - 0.025
+            - 0.025
+            articulation_props: null
+            fixed_tendons_props: null
+            spatial_tendons_props: null
+            joint_drive_props: null
+            visual_material_path: material
+            visual_material: null
+            usd_path: http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.0/Isaac/Props/UIElements/frame_prim.usd
+            variants: null
+          connecting_line:
+            func: isaaclab.sim.spawners.shapes.shapes:spawn_cylinder
+            visible: true
+            semantic_tags: null
+            copy_from_source: true
+            mass_props: null
+            rigid_props: null
+            collision_props: null
+            activate_contact_sensors: false
+            visual_material_path: material
+            visual_material:
+              func: isaaclab.sim.spawners.materials.visual_materials:spawn_preview_surface
+              diffuse_color:
+              - 1.0
+              - 1.0
+              - 0.0
+              emissive_color:
+              - 0.0
+              - 0.0
+              - 0.0
+              roughness: 1.0
+              metallic: 0.0
+              opacity: 1.0
+            physics_material_path: material
+            physics_material: null
+            radius: 0.002
+            height: 1.0
+            axis: Z
+    contacts_robot:
+      class_type: isaaclab.sensors.contact_sensor.contact_sensor:ContactSensor
+      prim_path: '{ENV_REGEX_NS}/robot/.*'
+      update_period: 0.0
+      history_length: 0
+      debug_vis: false
+      track_pose: false
+      track_contact_points: false
+      max_contact_data_count_per_prim: 4
+      track_air_time: false
+      force_threshold: 1.0
+      filter_prim_paths_expr: []
+      visualizer_cfg:
+        prim_path: /Visuals/ContactSensor
+        markers:
+          contact:
+            func: isaaclab.sim.spawners.shapes.shapes:spawn_sphere
+            visible: true
+            semantic_tags: null
+            copy_from_source: true
+            mass_props: null
+            rigid_props: null
+            collision_props: null
+            activate_contact_sensors: false
+            visual_material_path: material
+            visual_material:
+              func: isaaclab.sim.spawners.materials.visual_materials:spawn_preview_surface
+              diffuse_color:
+              - 1.0
+              - 0.0
+              - 0.0
+              emissive_color:
+              - 0.0
+              - 0.0
+              - 0.0
+              roughness: 0.5
+              metallic: 0.0
+              opacity: 1.0
+            physics_material_path: material
+            physics_material: null
+            radius: 0.02
+          no_contact:
+            func: isaaclab.sim.spawners.shapes.shapes:spawn_sphere
+            visible: false
+            semantic_tags: null
+            copy_from_source: true
+            mass_props: null
+            rigid_props: null
+            collision_props: null
+            activate_contact_sensors: false
+            visual_material_path: material
+            visual_material:
+              func: isaaclab.sim.spawners.materials.visual_materials:spawn_preview_surface
+              diffuse_color:
+              - 0.0
+              - 1.0
+              - 0.0
+              emissive_color:
+              - 0.0
+              - 0.0
+              - 0.0
+              roughness: 0.5
+              metallic: 0.0
+              opacity: 1.0
+            physics_material_path: material
+            physics_material: null
+            radius: 0.02
+    contacts_end_effector: null
+    sample:
+      class_type: isaaclab.assets.rigid_object.rigid_object:RigidObject
+      prim_path: '{ENV_REGEX_NS}/sample'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props:
+          mass: null
+          density: 1500.0
+        deformable_props: null
+        rigid_props:
+          rigid_body_enabled: null
+          kinematic_enabled: null
+          disable_gravity: null
+          linear_damping: null
+          angular_damping: null
+          max_linear_velocity: null
+          max_angular_velocity: null
+          max_depenetration_velocity: null
+          max_contact_impulse: null
+          enable_gyroscopic_forces: null
+          retain_accelerations: null
+          solver_position_iteration_count: null
+          solver_velocity_iteration_count: null
+          sleep_threshold: null
+          stabilization_threshold: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: null
+          rest_offset: null
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: false
+        scale: null
+        articulation_props: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        usd_path: /root/ws/assets/srb_assets/object/sample_tube.usdc
+        variants: null
+        mesh_collision_props:
+          func: simforge.integrations.isaaclab.schemas.impl:set_mesh_collision_properties
+          mesh_approximation: convexDecomposition
+          sdf_resolution: 128
+        physics_material: null
+      init_state:
+        pos:
+        - 0.5
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        lin_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        ang_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+      collision_group: 0
+      debug_vis: false
+    particles: null
+  events:
+    reset_scene:
+      func: srb.core.mdp.events:reset_articulations_default
+      params: {}
+      mode: reset
+      interval_range_s: null
+      is_global_time: false
+      min_step_count_between_reset: 0
+    randomize_gravity:
+      func: srb.core.mdp.events:randomize_gravity_uniform
+      params:
+        distribution_params:
+        - - 0.0
+          - 0.0
+          - -3.70681
+        - - 0.0
+          - 0.0
+          - -3.7347099999999998
+      mode: interval
+      interval_range_s:
+      - 10.0
+      - 60.0
+      is_global_time: true
+      min_step_count_between_reset: 0
+    randomize_sunlight_orientation:
+      func: srb.core.mdp.events:reset_xform_orientation_uniform
+      params:
+        asset_cfg:
+          name: sunlight
+          joint_names: null
+          joint_ids: slice(None,None,None)
+          fixed_tendon_names: null
+          fixed_tendon_ids: slice(None,None,None)
+          body_names: null
+          body_ids: slice(None,None,None)
+          object_collection_names: null
+          object_collection_ids: slice(None,None,None)
+          preserve_order: false
+        orientation_distribution_params:
+          roll:
+          - -1.0471975511965976
+          - 1.0471975511965976
+          pitch:
+          - -1.0471975511965976
+          - 1.0471975511965976
+      mode: interval
+      interval_range_s:
+      - 10.0
+      - 60.0
+      is_global_time: true
+      min_step_count_between_reset: 0
+    randomize_sunlight_intensity:
+      func: srb.core.mdp.events:randomize_usd_prim_attribute_uniform
+      params:
+        asset_cfg:
+          name: sunlight
+          joint_names: null
+          joint_ids: slice(None,None,None)
+          fixed_tendon_names: null
+          fixed_tendon_ids: slice(None,None,None)
+          body_names: null
+          body_ids: slice(None,None,None)
+          object_collection_names: null
+          object_collection_ids: slice(None,None,None)
+          preserve_order: false
+        attr_name: intensity
+        distribution_params:
+        - 616.0
+        - 842.0
+      mode: interval
+      interval_range_s:
+      - 10.0
+      - 60.0
+      is_global_time: true
+      min_step_count_between_reset: 0
+    randomize_sunlight_angular_diameter:
+      func: srb.core.mdp.events:randomize_usd_prim_attribute_uniform
+      params:
+        asset_cfg:
+          name: sunlight
+          joint_names: null
+          joint_ids: slice(None,None,None)
+          fixed_tendon_names: null
+          fixed_tendon_ids: slice(None,None,None)
+          body_names: null
+          body_ids: slice(None,None,None)
+          object_collection_names: null
+          object_collection_ids: slice(None,None,None)
+          preserve_order: false
+        attr_name: angle
+        distribution_params:
+        - 0.31
+        - 0.38999999999999996
+      mode: interval
+      interval_range_s:
+      - 10.0
+      - 60.0
+      is_global_time: true
+      min_step_count_between_reset: 0
+    randomize_sunlight_color_temperature:
+      func: srb.core.mdp.events:randomize_usd_prim_attribute_uniform
+      params:
+        asset_cfg:
+          name: sunlight
+          joint_names: null
+          joint_ids: slice(None,None,None)
+          fixed_tendon_names: null
+          fixed_tendon_ids: slice(None,None,None)
+          body_names: null
+          body_ids: slice(None,None,None)
+          object_collection_names: null
+          object_collection_ids: slice(None,None,None)
+          preserve_order: false
+        attr_name: color_temperature
+        distribution_params:
+        - 6000.0
+        - 6500.0
+      mode: interval
+      interval_range_s:
+      - 10.0
+      - 60.0
+      is_global_time: true
+      min_step_count_between_reset: 0
+    randomize_skydome_orientation:
+      func: srb.core.mdp.events:reset_xform_orientation_uniform
+      params:
+        asset_cfg:
+          name: skydome
+          joint_names: null
+          joint_ids: slice(None,None,None)
+          fixed_tendon_names: null
+          fixed_tendon_ids: slice(None,None,None)
+          body_names: null
+          body_ids: slice(None,None,None)
+          object_collection_names: null
+          object_collection_ids: slice(None,None,None)
+          preserve_order: false
+        orientation_distribution_params:
+          yaw:
+          - -3.141592653589793
+          - 3.141592653589793
+      mode: interval
+      interval_range_s:
+      - 10.0
+      - 60.0
+      is_global_time: true
+      min_step_count_between_reset: 0
+    mobile_manipulator_dynamic_root_joint_release: null
+    randomize_robot_joints:
+      func: isaaclab.envs.mdp.events:reset_joints_by_offset
+      params:
+        asset_cfg:
+          name: robot
+          joint_names: null
+          joint_ids: slice(None,None,None)
+          fixed_tendon_names: null
+          fixed_tendon_ids: slice(None,None,None)
+          body_names: null
+          body_ids: slice(None,None,None)
+          object_collection_names: null
+          object_collection_ids: slice(None,None,None)
+          preserve_order: false
+        position_range:
+        - -0.08726646259971647
+        - 0.08726646259971647
+        velocity_range:
+        - 0.0
+        - 0.0
+      mode: reset
+      interval_range_s: null
+      is_global_time: false
+      min_step_count_between_reset: 0
+    randomize_object_state:
+      func: isaaclab.envs.mdp.events:reset_root_state_uniform
+      params:
+        asset_cfg:
+          name: sample
+          joint_names: null
+          joint_ids: slice(None,None,None)
+          fixed_tendon_names: null
+          fixed_tendon_ids: slice(None,None,None)
+          body_names: null
+          body_ids: slice(None,None,None)
+          object_collection_names: null
+          object_collection_ids: slice(None,None,None)
+          preserve_order: false
+        pose_range:
+          x:
+          - -0.15
+          - 0.15
+          'y':
+          - -0.3
+          - 0.3
+          z:
+          - 0.05
+          - 0.05
+          roll:
+          - 0.4487989505128276
+          - 0.4487989505128276
+          pitch:
+          - 1.5271630954950381
+          - 1.5271630954950381
+          yaw:
+          - -3.141592653589793
+          - 3.141592653589793
+        velocity_range: {}
+      mode: reset
+      interval_range_s: null
+      is_global_time: false
+      min_step_count_between_reset: 0
+    settle_and_reset_particles: null
+  observation_space: '{"type": "gymnasium", "space": "Box", "low": [-1.0], "high":
+    [1.0], "shape": [1]}'
+  num_observations: null
+  state_space: '{"type": "gymnasium", "space": "Box", "low": [-1.0], "high": [1.0],
+    "shape": [1]}'
+  num_states: null
+  observation_noise_model: null
+  action_space: '{"type": "gymnasium", "space": "Box", "low": [-1.0], "high": [1.0],
+    "shape": [1]}'
+  num_actions: null
+  action_noise_model: null
+  rerender_on_reset: false
+  wait_for_textures: true
+  xr: null
+  log_dir: null
+  domain:
+    _value_: '3'
+    _name_: MARS
+    _sort_order_: 2
+  gravity: null
+  skydome: low_res
+  scenery:
+    _value_: '3'
+    _name_: PROCEDURAL
+    _sort_order_: 2
+  _scenery:
+    asset_cfg:
+      class_type: null
+      prim_path: '{ENV_REGEX_NS}/scenery'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.simforge_asset.impl:spawn_simforge_assets
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        deformable_props: null
+        rigid_props: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: null
+          rest_offset: null
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: false
+        scale: null
+        articulation_props: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        mesh_collision_props: null
+        physics_material: null
+        assets:
+        - geo:
+            ops:
+            - nodes:
+                name: MarsSurface
+                python_file: !!python/object/apply:pathlib.PosixPath
+                - /
+                - root
+                - simforge_foundry
+                - simforge_foundry
+                - geometry
+                - terrain
+                - mars_surface
+                - nodes.py
+              scale:
+              - 4.0
+              - 4.0
+              - 0.4
+              density: 0.04
+              flat_area_size: 1.8379173679952558
+              rock_mesh_boolean_enable: false
+              mat: null
+          mat:
+            shader:
+              nodes:
+                name: MarsSurfaceShader
+                python_file: !!python/object/apply:pathlib.PosixPath
+                - /
+                - root
+                - simforge_foundry
+                - simforge_foundry
+                - material
+                - natural
+                - mars_surface
+                - nodes.py
+          texture_resolution:
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "ALBEDO"}': 2048
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "EMISSION"}': 256
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "METALLIC"}': 512
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "NORMAL"}': 2048
+            '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "ROUGHNESS"}': 1024
+        export_kwargs: {}
+        num_assets: 1
+        seed: 0
+        use_cache: true
+        random_choice: false
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+      collision_group: 0
+      debug_vis: false
+    scale:
+    - 4.0
+    - 4.0
+    - 0.4
+    texture_resolution:
+      '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "ALBEDO"}': 2048
+      '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "EMISSION"}': 256
+      '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "METALLIC"}': 512
+      '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "NORMAL"}': 2048
+      '{"_type_": "enum", "path": "simforge.core.baker.bake_type.BakeType", "value": "ROUGHNESS"}': 1024
+    density: 0.04
+    flat_area_size: 1.8379173679952558
+    asset_variant:
+      _value_: '3'
+      _name_: PROCEDURAL
+      _sort_order_: 2
+  robot:
+    asset_cfg:
+      class_type: isaaclab.assets.articulation.articulation:Articulation
+      prim_path: '{ENV_REGEX_NS}/robot'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        deformable_props: null
+        rigid_props:
+          rigid_body_enabled: null
+          kinematic_enabled: null
+          disable_gravity: true
+          linear_damping: null
+          angular_damping: null
+          max_linear_velocity: null
+          max_angular_velocity: null
+          max_depenetration_velocity: 5.0
+          max_contact_impulse: null
+          enable_gyroscopic_forces: null
+          retain_accelerations: null
+          solver_position_iteration_count: null
+          solver_velocity_iteration_count: null
+          sleep_threshold: null
+          stabilization_threshold: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: 0.005
+          rest_offset: 0.0
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: true
+        scale: null
+        articulation_props:
+          articulation_enabled: null
+          enabled_self_collisions: false
+          solver_position_iteration_count: 12
+          solver_velocity_iteration_count: 1
+          sleep_threshold: null
+          stabilization_threshold: null
+          fix_root_link: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        usd_path: /root/ws/assets/srb_assets/robot/manipulator/franka_arm.usdz
+        variants: null
+        mesh_collision_props:
+          func: simforge.integrations.isaaclab.schemas.impl:set_mesh_collision_properties
+          mesh_approximation: convexDecomposition
+          sdf_resolution: 128
+        physics_material: null
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        lin_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        ang_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        joint_pos:
+          panda_joint1: 0.0
+          panda_joint2: 0.0
+          panda_joint3: 0.0
+          panda_joint4: -1.5707963267948966
+          panda_joint5: 0.0
+          panda_joint6: 1.5707963267948966
+          panda_joint7: 0.7853981633974483
+        joint_vel:
+          .*: 0.0
+      collision_group: 0
+      debug_vis: false
+      articulation_root_prim_path: null
+      soft_joint_pos_limit_factor: 1.0
+      actuators:
+        panda_shoulder:
+          class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+          joint_names_expr:
+          - panda_joint[1-4]
+          effort_limit: 87.0
+          velocity_limit: 2.175
+          effort_limit_sim: null
+          velocity_limit_sim: null
+          stiffness: 4000.0
+          damping: 800.0
+          armature: null
+          friction: null
+          dynamic_friction: null
+          viscous_friction: null
+        panda_forearm:
+          class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+          joint_names_expr:
+          - panda_joint[5-7]
+          effort_limit: 12.0
+          velocity_limit: 2.61
+          effort_limit_sim: null
+          velocity_limit_sim: null
+          stiffness: 4000.0
+          damping: 800.0
+          armature: null
+          friction: null
+          dynamic_friction: null
+          viscous_friction: null
+      actuator_value_resolution_debug_print: false
+    scale: null
+    texture_resolution: null
+    actions:
+      delta_twist:
+        class_type: srb.core.action.term.manipulation.differential_ik:DifferentialInverseKinematicsAction
+        asset_name: robot
+        debug_vis: false
+        clip: null
+        joint_names:
+        - panda_joint[1-7]
+        body_name: panda_link7
+        body_offset:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.10339999943971634
+          rot:
+          - 1.0
+          - 0.0
+          - 0.0
+          - 0.0
+        scale: 0.1
+        controller:
+          class_type: isaaclab.controllers.differential_ik:DifferentialIKController
+          command_type: pose
+          use_relative_mode: true
+          ik_method: dls
+          ik_params:
+            lambda_val: 0.01
+        base_name: panda_link0
+    frame_base:
+      prim_relpath: panda_link0
+      offset:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+    end_effector:
+      asset_cfg:
+        class_type: isaaclab.assets.articulation.articulation:Articulation
+        prim_path: '{ENV_REGEX_NS}/end_effector'
+        spawn:
+          func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+          visible: true
+          semantic_tags: null
+          copy_from_source: true
+          mass_props: null
+          deformable_props: null
+          rigid_props:
+            rigid_body_enabled: null
+            kinematic_enabled: null
+            disable_gravity: true
+            linear_damping: null
+            angular_damping: null
+            max_linear_velocity: null
+            max_angular_velocity: null
+            max_depenetration_velocity: 5.0
+            max_contact_impulse: null
+            enable_gyroscopic_forces: null
+            retain_accelerations: null
+            solver_position_iteration_count: null
+            solver_velocity_iteration_count: null
+            sleep_threshold: null
+            stabilization_threshold: null
+          collision_props:
+            collision_enabled: null
+            contact_offset: 0.005
+            rest_offset: 0.0
+            torsional_patch_radius: null
+            min_torsional_patch_radius: null
+          activate_contact_sensors: true
+          scale: null
+          articulation_props:
+            articulation_enabled: null
+            enabled_self_collisions: false
+            solver_position_iteration_count: 12
+            solver_velocity_iteration_count: 1
+            sleep_threshold: null
+            stabilization_threshold: null
+            fix_root_link: null
+          fixed_tendons_props: null
+          spatial_tendons_props: null
+          joint_drive_props: null
+          visual_material_path: material
+          visual_material: null
+          usd_path: /root/ws/assets/srb_assets/robot/gripper/franka_hand.usdz
+          variants: null
+          mesh_collision_props: null
+          physics_material: null
+        init_state:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.10700000077486038
+          rot:
+          - 0.9238795042037964
+          - 0.0
+          - 0.0
+          - -0.3826834261417389
+          lin_vel:
+          - 0.0
+          - 0.0
+          - 0.0
+          ang_vel:
+          - 0.0
+          - 0.0
+          - 0.0
+          joint_pos:
+            panda_finger_joint.*: 0.04
+          joint_vel:
+            .*: 0.0
+        collision_group: 0
+        debug_vis: false
+        articulation_root_prim_path: null
+        soft_joint_pos_limit_factor: 1.0
+        actuators:
+          panda_hand:
+            class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+            joint_names_expr:
+            - panda_finger_joint.*
+            effort_limit: 200.0
+            velocity_limit: 0.2
+            effort_limit_sim: null
+            velocity_limit_sim: null
+            stiffness: 2000.0
+            damping: 250.0
+            armature: null
+            friction: null
+            dynamic_friction: null
+            viscous_friction: null
+        actuator_value_resolution_debug_print: false
+      scale: null
+      texture_resolution: null
+      frame_mount:
+        prim_relpath: panda_hand
+        offset:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.0
+          rot:
+          - 1.0
+          - 0.0
+          - 0.0
+          - 0.0
+      frame_tool_centre_point:
+        prim_relpath: panda_hand
+        offset:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.1034
+          rot:
+          - 1.0
+          - 0.0
+          - 0.0
+          - 0.0
+      actions:
+        joint_pos:
+          class_type: isaaclab.envs.mdp.actions.binary_joint_actions:BinaryJointPositionAction
+          asset_name: end_effector
+          debug_vis: false
+          clip: null
+          joint_names:
+          - panda_finger_joint.*
+          open_command_expr:
+            panda_finger_joint.*: 0.04
+          close_command_expr:
+            panda_finger_joint.*: 0.0
+    frame_flange:
+      prim_relpath: panda_link7
+      offset:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.107
+        rot:
+        - 0.9238795325112867
+        - 0.0
+        - 0.0
+        - -0.3826834323650898
+    frame_base_camera:
+      prim_relpath: panda_link0/camera_base
+      offset:
+        pos:
+        - 0.16
+        - 0.0
+        - 0.1
+        rot:
+        - 0.8870108331782217
+        - 0.0
+        - 0.4617486132350339
+        - 0.0
+    frame_wrist_camera:
+      prim_relpath: panda_link7/camera_wrist
+      offset:
+        pos:
+        - 0.075
+        - -0.075
+        - 0.1
+        rot:
+        - 0.29315251683697435
+        - 0.5938583163412473
+        - -0.2459841687565965
+        - 0.7077327819916304
+  _robot:
+    asset_cfg:
+      class_type: isaaclab.assets.articulation.articulation:Articulation
+      prim_path: '{ENV_REGEX_NS}/robot'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        deformable_props: null
+        rigid_props:
+          rigid_body_enabled: null
+          kinematic_enabled: null
+          disable_gravity: true
+          linear_damping: null
+          angular_damping: null
+          max_linear_velocity: null
+          max_angular_velocity: null
+          max_depenetration_velocity: 5.0
+          max_contact_impulse: null
+          enable_gyroscopic_forces: null
+          retain_accelerations: null
+          solver_position_iteration_count: null
+          solver_velocity_iteration_count: null
+          sleep_threshold: null
+          stabilization_threshold: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: 0.005
+          rest_offset: 0.0
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: true
+        scale: null
+        articulation_props:
+          articulation_enabled: null
+          enabled_self_collisions: false
+          solver_position_iteration_count: 12
+          solver_velocity_iteration_count: 1
+          sleep_threshold: null
+          stabilization_threshold: null
+          fix_root_link: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        usd_path: /root/ws/assets/srb_assets/robot/manipulator/franka_arm.usdz
+        variants: null
+        mesh_collision_props:
+          func: simforge.integrations.isaaclab.schemas.impl:set_mesh_collision_properties
+          mesh_approximation: convexDecomposition
+          sdf_resolution: 128
+        physics_material: null
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        lin_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        ang_vel:
+        - 0.0
+        - 0.0
+        - 0.0
+        joint_pos:
+          panda_joint1: 0.0
+          panda_joint2: 0.0
+          panda_joint3: 0.0
+          panda_joint4: -1.5707963267948966
+          panda_joint5: 0.0
+          panda_joint6: 1.5707963267948966
+          panda_joint7: 0.7853981633974483
+        joint_vel:
+          .*: 0.0
+      collision_group: 0
+      debug_vis: false
+      articulation_root_prim_path: null
+      soft_joint_pos_limit_factor: 1.0
+      actuators:
+        panda_shoulder:
+          class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+          joint_names_expr:
+          - panda_joint[1-4]
+          effort_limit: 87.0
+          velocity_limit: 2.175
+          effort_limit_sim: null
+          velocity_limit_sim: null
+          stiffness: 4000.0
+          damping: 800.0
+          armature: null
+          friction: null
+          dynamic_friction: null
+          viscous_friction: null
+        panda_forearm:
+          class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+          joint_names_expr:
+          - panda_joint[5-7]
+          effort_limit: 12.0
+          velocity_limit: 2.61
+          effort_limit_sim: null
+          velocity_limit_sim: null
+          stiffness: 4000.0
+          damping: 800.0
+          armature: null
+          friction: null
+          dynamic_friction: null
+          viscous_friction: null
+      actuator_value_resolution_debug_print: false
+    scale: null
+    texture_resolution: null
+    actions:
+      delta_twist:
+        class_type: srb.core.action.term.manipulation.differential_ik:DifferentialInverseKinematicsAction
+        asset_name: robot
+        debug_vis: false
+        clip: null
+        joint_names:
+        - panda_joint[1-7]
+        body_name: panda_link7
+        body_offset:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.10339999943971634
+          rot:
+          - 1.0
+          - 0.0
+          - 0.0
+          - 0.0
+        scale: 0.1
+        controller:
+          class_type: isaaclab.controllers.differential_ik:DifferentialIKController
+          command_type: pose
+          use_relative_mode: true
+          ik_method: dls
+          ik_params:
+            lambda_val: 0.01
+        base_name: panda_link0
+    frame_base:
+      prim_relpath: panda_link0
+      offset:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+    end_effector:
+      asset_cfg:
+        class_type: isaaclab.assets.articulation.articulation:Articulation
+        prim_path: '{ENV_REGEX_NS}/end_effector'
+        spawn:
+          func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+          visible: true
+          semantic_tags: null
+          copy_from_source: true
+          mass_props: null
+          deformable_props: null
+          rigid_props:
+            rigid_body_enabled: null
+            kinematic_enabled: null
+            disable_gravity: true
+            linear_damping: null
+            angular_damping: null
+            max_linear_velocity: null
+            max_angular_velocity: null
+            max_depenetration_velocity: 5.0
+            max_contact_impulse: null
+            enable_gyroscopic_forces: null
+            retain_accelerations: null
+            solver_position_iteration_count: null
+            solver_velocity_iteration_count: null
+            sleep_threshold: null
+            stabilization_threshold: null
+          collision_props:
+            collision_enabled: null
+            contact_offset: 0.005
+            rest_offset: 0.0
+            torsional_patch_radius: null
+            min_torsional_patch_radius: null
+          activate_contact_sensors: true
+          scale: null
+          articulation_props:
+            articulation_enabled: null
+            enabled_self_collisions: false
+            solver_position_iteration_count: 12
+            solver_velocity_iteration_count: 1
+            sleep_threshold: null
+            stabilization_threshold: null
+            fix_root_link: null
+          fixed_tendons_props: null
+          spatial_tendons_props: null
+          joint_drive_props: null
+          visual_material_path: material
+          visual_material: null
+          usd_path: /root/ws/assets/srb_assets/robot/gripper/franka_hand.usdz
+          variants: null
+          mesh_collision_props: null
+          physics_material: null
+        init_state:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.10700000077486038
+          rot:
+          - 0.9238795042037964
+          - 0.0
+          - 0.0
+          - -0.3826834261417389
+          lin_vel:
+          - 0.0
+          - 0.0
+          - 0.0
+          ang_vel:
+          - 0.0
+          - 0.0
+          - 0.0
+          joint_pos:
+            panda_finger_joint.*: 0.04
+          joint_vel:
+            .*: 0.0
+        collision_group: 0
+        debug_vis: false
+        articulation_root_prim_path: null
+        soft_joint_pos_limit_factor: 1.0
+        actuators:
+          panda_hand:
+            class_type: isaaclab.actuators.actuator_pd:ImplicitActuator
+            joint_names_expr:
+            - panda_finger_joint.*
+            effort_limit: 200.0
+            velocity_limit: 0.2
+            effort_limit_sim: null
+            velocity_limit_sim: null
+            stiffness: 2000.0
+            damping: 250.0
+            armature: null
+            friction: null
+            dynamic_friction: null
+            viscous_friction: null
+        actuator_value_resolution_debug_print: false
+      scale: null
+      texture_resolution: null
+      frame_mount:
+        prim_relpath: panda_hand
+        offset:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.0
+          rot:
+          - 1.0
+          - 0.0
+          - 0.0
+          - 0.0
+      frame_tool_centre_point:
+        prim_relpath: panda_hand
+        offset:
+          pos:
+          - 0.0
+          - 0.0
+          - 0.1034
+          rot:
+          - 1.0
+          - 0.0
+          - 0.0
+          - 0.0
+      actions:
+        joint_pos:
+          class_type: isaaclab.envs.mdp.actions.binary_joint_actions:BinaryJointPositionAction
+          asset_name: end_effector
+          debug_vis: false
+          clip: null
+          joint_names:
+          - panda_finger_joint.*
+          open_command_expr:
+            panda_finger_joint.*: 0.04
+          close_command_expr:
+            panda_finger_joint.*: 0.0
+    frame_flange:
+      prim_relpath: panda_link7
+      offset:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.107
+        rot:
+        - 0.9238795325112867
+        - 0.0
+        - 0.0
+        - -0.3826834323650898
+    frame_base_camera:
+      prim_relpath: panda_link0/camera_base
+      offset:
+        pos:
+        - 0.16
+        - 0.0
+        - 0.1
+        rot:
+        - 0.8870108331782217
+        - 0.0
+        - 0.4617486132350339
+        - 0.0
+    frame_wrist_camera:
+      prim_relpath: panda_link7/camera_wrist
+      offset:
+        pos:
+        - 0.075
+        - -0.075
+        - 0.1
+        rot:
+        - 0.29315251683697435
+        - 0.5938583163412473
+        - -0.2459841687565965
+        - 0.7077327819916304
+  n_procgen_variants: null
+  joint_assemblies:
+    end_effector:
+      base_path: '{ENV_REGEX_NS}/robot'
+      attach_path: '{ENV_REGEX_NS}/end_effector'
+      base_mount_frame: /panda_link7
+      attach_mount_frame: /panda_hand
+      fixed_joint_offset:
+      - 0.0
+      - 0.0
+      - 0.10700000077486038
+      fixed_joint_orient:
+      - 0.9238795042037964
+      - 0.0
+      - 0.0
+      - -0.3826834261417389
+      mask_all_collisions: true
+      mask_attached_collisions: true
+      disable_root_joints: true
+      refresh_asset_paths: false
+  assemble_rigid_end_effector: true
+  stack: false
+  num_envs: null
+  spacing: 4.0
+  env_rate: 0.006666666666666667
+  agent_rate: 0.02
+  malloc_scale: 1.0
+  visuals:
+    func: srb.core.visuals.cfg:set_visuals
+    fog:
+      enable: false
+      color:
+      - 0.75
+      - 0.75
+      - 0.75
+      intensity: 1.0
+      z_up: true
+      start_height: 1.0
+      height_density: 1.0
+      height_falloff: 1.0
+      distance_range:
+      - 0.0
+      - 1024.0
+      fog_distance_density: 1.0
+    auto_exposure:
+      enable: false
+      filter_type: 0
+      tau: 3.5
+      white_scale: 10.0
+      use_exposure_clamping: true
+      min_ev: 50.0
+      max_ev: 100000.0
+    chromatic_aberration:
+      enable: false
+      strength:
+      - -0.055
+      - -0.075
+      - 0.015
+      mode:
+      - 0
+      - 0
+      - 0
+      lanczos: false
+    depth_of_field:
+      enable: false
+      subject_distance: 2.0
+      focal_length: 35.0
+      f_number: 5.0
+      anisotropy: 0.0
+    motion_blur:
+      enable: false
+      diameter_fraction: 0.02
+      exposure_fraction: 1.0
+      num_samples: 8
+    lens_flare:
+      enable: false
+      scale: 1.0
+      cutoff_point:
+      - 2.0
+      - 2.0
+      - 2.0
+      cutoff_fuzziness: 0.5
+      alpha_exposure_scale: 1.0
+      energy_constraining_blend: false
+      blades: 5
+      aperture_rotation: 5.0
+      sensor_diagonal: 60.0
+      sensor_aspect_ratio: 1.5
+      f_number: 5.0
+      focal_length: 35.0
+      noise_strength: 0.0
+      dust_strength: 0.0
+      scratch_strength: 0.0
+      spectral_blur_samples: 0
+      spectral_blur_intensity: 10.0
+      spectral_blur_wavelength_range:
+      - 380.0
+      - 550.0
+      - 770.0
+    tv_noise:
+      enable_scanlines: false
+      scanline_spread: 1.0
+      enable_scroll_bug: false
+      enable_vignetting: false
+      vignetting_size: 107.0
+      vignetting_strength: 0.7
+      enable_vignetting_flickering: false
+      enable_ghost_flickering: false
+      enable_wave_distortion: false
+      enable_vertical_lines: false
+      enable_random_splotches: false
+      enable_film_grain: false
+      grain_amount: 0.05
+      color_amount: 0.6
+      lum_amount: 1.0
+      grain_size: 1.6
+    reshade:
+      enable: false
+      preset_file_path: ''
+      effect_search_dir_path: ''
+      texture_search_dir_path: /root/isaac-sim/kit/reshade
+  truncate_episodes: true
+  extras: false
+  debug_vis: false
+  particles: false
+  particles_size: 0.025
+  particles_ratio: 0.001
+  action_delay_steps: 0
+  action_delay_on_step_change_freq: 1.0
+  action_delay_on_step_change_prob: 0.01
+  observation_delay_steps: 0
+  observation_delay_on_step_change_freq: 1.0
+  observation_delay_on_step_change_prob: 0.01
+  pedestal:
+    asset_cfg:
+      class_type: null
+      prim_path: '{ENV_REGEX_NS}/pedestal'
+      spawn:
+        func: simforge.integrations.isaaclab.spawner.from_files.impl:spawn_from_usd
+        visible: true
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        deformable_props: null
+        rigid_props: null
+        collision_props:
+          collision_enabled: null
+          contact_offset: null
+          rest_offset: null
+          torsional_patch_radius: null
+          min_torsional_patch_radius: null
+        activate_contact_sensors: false
+        scale: null
+        articulation_props: null
+        fixed_tendons_props: null
+        spatial_tendons_props: null
+        joint_drive_props: null
+        visual_material_path: material
+        visual_material: null
+        usd_path: /root/ws/assets/srb_assets/object/industrial_pedestal_25cm.usdz
+        variants: null
+        mesh_collision_props: null
+        physics_material: null
+      init_state:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.0
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+      collision_group: 0
+      debug_vis: false
+    scale: null
+    texture_resolution: null
+    frame_manipulator_mount:
+      prim_relpath: pedestal
+      offset:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.25
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+  sample:
+    _value_: '2'
+    _name_: DATASET
+    _sort_order_: 1
+  tf_pos_target:
+  - 0.5
+  - 0.0
+  - 0.75
+  tf_quat_target:
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  target_marker_cfg:
+    prim_path: /Visuals/target
+    markers:
+      target:
+        func: isaaclab.sim.spawners.shapes.shapes:spawn_sphere
+        visible: false
+        semantic_tags: null
+        copy_from_source: true
+        mass_props: null
+        rigid_props: null
+        collision_props: null
+        activate_contact_sensors: false
+        visual_material_path: material
+        visual_material:
+          func: isaaclab.sim.spawners.materials.visual_materials:spawn_preview_surface
+          diffuse_color:
+          - 0.18
+          - 0.18
+          - 0.18
+          emissive_color:
+          - 0.2
+          - 0.2
+          - 0.8
+          roughness: 0.5
+          metallic: 0.0
+          opacity: 1.0
+        physics_material_path: material
+        physics_material: null
+        radius: 0.02
+  actions:
+    robot/differential_inverse_kinematics:
+      class_type: srb.core.action.term.manipulation.differential_ik:DifferentialInverseKinematicsAction
+      asset_name: robot
+      debug_vis: false
+      clip: null
+      joint_names:
+      - panda_joint[1-7]
+      body_name: panda_link7
+      body_offset:
+        pos:
+        - 0.0
+        - 0.0
+        - 0.10339999943971634
+        rot:
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+      scale: 0.1
+      controller:
+        class_type: isaaclab.controllers.differential_ik:DifferentialIKController
+        command_type: pose
+        use_relative_mode: true
+        ik_method: dls
+        ik_params:
+          lambda_val: 0.01
+      base_name: panda_link0
+    end_effector/binary_joint_position:
+      class_type: isaaclab.envs.mdp.actions.binary_joint_actions:BinaryJointPositionAction
+      asset_name: end_effector
+      debug_vis: false
+      clip: null
+      joint_names:
+      - panda_finger_joint.*
+      open_command_expr:
+        panda_finger_joint.*: 0.04
+      close_command_expr:
+        panda_finger_joint.*: 0.0
+    map_cmd_to_action: lambda twist
+agent: {}
