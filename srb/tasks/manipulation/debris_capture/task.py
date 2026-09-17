@@ -39,6 +39,7 @@ from srb.utils.math import (
     scale_transform,
     subtract_frame_transforms,
 )
+from srb.utils.path import SRB_ASSETS_DIR_SPACE
 
 from .asset import select_debris
 
@@ -64,7 +65,7 @@ class SceneCfg(ManipulationSceneCfg):
     mep: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/mep",
         spawn=UsdFileCfg(
-            usd_path="/home/rokey/space_asset/mep_combined.usd",
+            usd_path=SRB_ASSETS_DIR_SPACE.joinpath("mep_combined.usd").as_posix(),
             collision_props=CollisionPropertiesCfg(),
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),
@@ -74,7 +75,7 @@ class SceneCfg(ManipulationSceneCfg):
     satellite: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/satellite",
         spawn=UsdFileCfg(
-            usd_path="/home/rokey/space_asset/satellite.usd",
+            usd_path=SRB_ASSETS_DIR_SPACE.joinpath("satellite.usd").as_posix(),
             collision_props=CollisionPropertiesCfg(),
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),

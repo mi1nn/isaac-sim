@@ -16,6 +16,9 @@ SRB_ASSETS_DIR_SRB_SKYDOME = SRB_ASSETS_DIR_SRB.joinpath("skydome")
 SRB_ASSETS_DIR_SRB_SKYDOME_LOW_RES = SRB_ASSETS_DIR_SRB_SKYDOME.joinpath("low_res")
 SRB_ASSETS_DIR_SRB_SKYDOME_HIGH_RES = SRB_ASSETS_DIR_SRB_SKYDOME.joinpath("high_res")
 
+# Path to space asset directory
+SRB_ASSETS_DIR_SPACE = SRB_DIR.joinpath("space_asset")
+
 # Path to hyperparameters directory
 SRB_HYPERPARAMS_DIR = SRB_DIR.joinpath("hyperparams")
 
