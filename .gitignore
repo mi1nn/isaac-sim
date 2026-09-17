@@ -38,3 +38,11 @@ wandb/
 
 ## Dump files
 **/core.*
+
+## OS / Editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
