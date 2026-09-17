@@ -49,6 +49,13 @@ class DirectEnv(__DirectRLEnv, metaclass=__PostInitCaller):
         self._robot: Articulation = self.scene["robot"]
 
     def __post_init__(self):
+        # Assemblies are created during `_setup_scene()` with the attached body still at
+        # its spawn pose, so the fixed joint is already violated before anything is ever
+        # reset. Align them once here: `_reset_idx()` does the same on every reset, but
+        # it does not run until the first `reset()`, and physics is live from the moment
+        # `sim.reset()` returns inside `__init__`.
+        self._align_joint_assemblies(log=True)
+
         if self._use_step_return_workflow:
             self._step_return = self.extract_step_return()
 
@@ -285,16 +292,7 @@ class DirectEnv(__DirectRLEnv, metaclass=__PostInitCaller):
         super()._reset_idx(env_ids)
 
         # Move assembled bodies to the correct position to avoid physics snapping them in place
-        if self.joint_assemblies:
-            # The reset events write joint positions with `set_dof_positions`, which does not
-            # recompute the link transforms PhysX reports. Without propagating the kinematics
-            # first, the mount frame read below is still the spawn-time one, so the attached
-            # body gets placed where its fixed joint cannot hold it and PhysX tears the
-            # assembly apart as soon as physics starts.
-            if self.sim.physics_sim_view is not None:
-                self.sim.physics_sim_view.update_articulations_kinematic()
-
-            self._update_assembly_fixed_joint_transforms(env_ids)
+        self._align_joint_assemblies(env_ids)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         if self.cfg.actions:
@@ -488,7 +486,37 @@ class DirectEnv(__DirectRLEnv, metaclass=__PostInitCaller):
                 for i in range(self.num_envs)
             )
 
-    def _update_assembly_fixed_joint_transforms(self, env_ids: Sequence[int]):
+    def _align_joint_assemblies(
+        self, env_ids: Sequence[int] | None = None, log: bool = False
+    ):
+        """Put every attached body exactly on its mount frame.
+
+        An assembly is a plain `UsdPhysics.FixedJoint` between a body of the base asset
+        and the root of the attached asset. The attached asset is spawned at its
+        mount-relative offset expressed from the env origin (see `_add_robot`), which is
+        nowhere near the mount once the base asset has a non-trivial pose, so PhysX
+        reports `found a joint with disjointed body transforms` and resolves the
+        violation by yanking both bodies together on the first step. Placing the
+        attached body here keeps that violation at zero.
+        """
+        if not self.joint_assemblies:
+            return
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)  # type: ignore
+
+        # The reset events write joint positions with `set_dof_positions`, which does not
+        # recompute the link transforms PhysX reports. Without propagating the kinematics
+        # first, the mount frame read below is still the spawn-time one, so the attached
+        # body gets placed where its fixed joint cannot hold it and PhysX tears the
+        # assembly apart as soon as physics starts.
+        if self.sim.physics_sim_view is not None:
+            self.sim.physics_sim_view.update_articulations_kinematic()
+
+        self._update_assembly_fixed_joint_transforms(env_ids, log=log)
+
+    def _update_assembly_fixed_joint_transforms(
+        self, env_ids: Sequence[int], log: bool = False
+    ):
         for key, assembly_cfg in self.cfg.joint_assemblies.items():
             attach_asset: RigidObject | Articulation = self.scene[key]
             base_asset: RigidObject | Articulation = self.scene[
@@ -546,7 +574,20 @@ class DirectEnv(__DirectRLEnv, metaclass=__PostInitCaller):
                 dim=1,
             )
 
+            if log:
+                logging.info(
+                    f"Assembly '{key}': attached body moved by up to "
+                    f"{torch.norm(pose[:, :3] - attach_root_state[:, :3], dim=-1).max().item():.3f} m "
+                    "onto its mount frame"
+                )
+
             attach_asset.write_root_pose_to_sim(pose, env_ids=env_ids)
+            # Teleporting the body without clearing its velocity would carry whatever
+            # momentum it picked up while it was mis-placed straight back into the
+            # fixed joint, which is the very kick this placement exists to prevent.
+            attach_asset.write_root_velocity_to_sim(
+                torch.zeros_like(attach_root_state[:, 7:]), env_ids=env_ids
+            )
 
 
 @torch.jit.script

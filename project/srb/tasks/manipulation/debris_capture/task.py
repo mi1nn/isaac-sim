@@ -134,6 +134,17 @@ class TaskCfg(ManipulationEnvCfg):
     scenery.asset_cfg.init_state.pos = (-1.65, 0.0, -1.05)
     scenery.asset_cfg.init_state.rot = rpy_to_quat(0.0, 0.0, 90.0)
     scenery.asset_cfg.spawn.scale = (3.4, 3.4, 3.4)
+    ## NOTE: The spacecraft is scenery here -- the Canadarm3 base is held by its own
+    ## world-fixed root joint, not bolted to this hull, so the hull's collision serves
+    ## no purpose in this task. It does cause harm: measured against the configured
+    ## initial arm pose, links 0/1/2 clear the (3.4x scaled, yaw 90 deg) hull by
+    ## 0.27/0.39/0.47 m, but the long boom (link 3) grazes a solar panel. A *static*
+    ## collider touching a dynamic link makes PhysX depenetrate it the moment physics
+    ## starts, which is a kick a manual grasp test should not have to fight. Delete
+    ## this line to get the hull's collision back.
+    scenery.asset_cfg.spawn.collision_props = CollisionPropertiesCfg(
+        collision_enabled=False
+    )
     pedestal: Object | AssetVariant | None = None
 
     ## Scene

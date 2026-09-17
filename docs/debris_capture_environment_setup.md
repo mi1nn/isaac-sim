@@ -48,6 +48,7 @@ Manual Grasp 검증
 - [x] Step 5. Collision approximation 수정 — 코드 작성 완료 / **실행 검증 미실행**
 - [x] Step 6. 수동 Joint 제어 구성 — 코드 작성 완료 / **실행 검증 미실행**
 - [x] Step 7. 수동 Gripper 제어 구성 — 코드 작성 완료 / **실행 검증 미실행**
+- [x] Step 7-1. Play 폭발 원인 정밀 측정 (USD 실측 + FK 계산) — 코드 작성 완료 / **실행 검증 미실행**
 - [ ] Step 8. Manual Grasp 테스트 (실기 검증)
 - [ ] Step 9. 최종 검증
 
@@ -321,6 +322,11 @@ srb agent manual --env debris_capture_visual \
 | `project/srb/__main__.py` | 기본 `L → env.reset` 키 바인딩 대상에서 `manual` 제외 | `manual` 이 자체적으로 `L` 을 바인딩 (reset + target 재동기화) |
 | `docs/debris_capture_environment_setup.md` | **신규 파일**. 이 작업 로그 | 요구사항 12 |
 | `project/srb/core/env/common/base/direct/impl.py` | `_reset_idx` 에서 `_update_assembly_fixed_joint_transforms` 호출 **직전**에 `physics_sim_view.update_articulations_kinematic()` 추가 | reset 이 쓴 관절 위치가 link transform 에 반영되기 전에 flange 포즈를 읽어 그리퍼를 엉뚱한 곳에 배치 → Play 시 fixed joint 가 폭발적으로 스냅 (문제 6) |
+| `project/srb/core/env/common/base/direct/impl.py` | `_align_joint_assemblies()` 헬퍼 신설 (kinematics 전파 → 배치 → **root 속도 0**), `__post_init__()` 에서 1회 호출, 배치 거리 로그 추가 | 첫 reset 이전부터 fixed joint 위반이 0 이 되도록. 옮기면서 속도를 지우지 않으면 스냅 운동량이 다시 joint 로 들어감 (문제 8-A) |
+| `project/srb/assets/object/tool/kinova_gripper.py` | `Kinova300Large` 게인 하향: `stiffness` 1.2e6→5000, `damping` 1e4→100, `effort_limit_sim` 2000→50, `velocity_limit_sim=5.0` 추가, `solver_velocity_iteration_count` 0→1, `mass_props(density=1000)` 제거 | author 된 `physics:mass` 가 density 를 이기므로 그리퍼는 74배 무거워진 적이 없음 → 게인이 실제 관성 대비 10⁶배 과함 (문제 8-B) |
+| `project/srb/assets/object/tool/kinova_gripper.py` | `frame_tool_centre_point` `0.64` → `0.672` | 0.16 × **4.2** 이어야 함 (기존 값은 4배 기준). TCP 가 3.2 cm 짧게 잡혀 있었음 (문제 10) |
+| `project/srb/assets/robot/manipulation/canadarm3.py` | `velocity_limit_sim=5.0` 추가, `fix_root_link` 관련 주석 명시 | 팔에도 PhysX 레벨 속도 상한 부여. 베이스는 USD `root_joint` 로 이미 고정 (가설 검증 요약 #1) |
+| `project/srb/tasks/manipulation/debris_capture/task.py` | scenery(VenusExpress) 에 `collision_props=CollisionPropertiesCfg(collision_enabled=False)` | 붐(link 3)이 태양전지판을 1.4 mm 스쳐 Play 시 정적 충돌체가 팔을 밀어냄 (문제 9) |
 | `project/srb/tasks/manipulation/debris_capture/task.py` | satellite spawn 에 `mesh_collision_props=MeshCollisionPropertiesCfg(mesh_approximation="convexHull")` 추가 | GOES_R 메시 25개가 approximation 없이 dynamic body 에 붙어 PhysX 에러를 25줄씩 뱉음 (문제 7) |
 | `project/srb/assets/robot/manipulation/canadarm3.py`, `project/srb/assets/object/tool/kinova_gripper.py` | `effort_limit` → `effort_limit_sim`, `velocity_limit` 제거 | Isaac Lab deprecation 경고 제거. implicit actuator 는 `velocity_limit` 을 애초에 쓰지 않으므로 거동 변화 없음 (문제 7) |
 
@@ -462,6 +468,11 @@ srb agent manual --env debris_capture_visual \
   이제 flange 포즈가 reset 된 관절 자세를 반영하므로 그리퍼가 정확한
   마운트 위치에 놓이고, fixed joint 위반이 0 이 되어 스냅이 사라집니다.
 - **검증**: 미실행
+- ⚠️ **이 수정만으로는 부족합니다.** 이후 USD 를 직접 열어 수치를 재어 본 결과
+  (1) 이 코드는 reset 경로에서만 돌기 때문에 **첫 reset 이전**(= `sim.reset()`
+  직후)에 이미 1.29 m 어긋난 joint 로 물리가 돌고, (2) 그것과 별개로 그리퍼
+  게인이 실제 관성 대비 10⁶배 과하게 잡혀 있었습니다.
+  → **문제 8** 에 정밀 측정 결과와 최종 수정을 정리했습니다.
 
 ### 문제 7 — 실행 시 PhysX 에러 / deprecation 경고 다수 출력
 
@@ -494,6 +505,171 @@ srb agent manual --env debris_capture_visual \
   - `A prim already exists at prim path: ...` → Isaac Lab 이 기존 prim 을 재사용하며
     cfg 를 덮어씁니다. 정상 경로입니다.
 - **검증**: 미실행
+
+### 문제 8 — Play 폭발의 진짜 원인 (정밀 측정 결과)
+
+문제 6 에서 넣은 `update_articulations_kinematic()` 수정은 **reset 경로만** 고친
+것이었습니다. USD 에셋을 직접 열어 수치를 재어 본 결과, Play 시 폭발은 서로
+독립적인 **두 개의 원인**이 겹친 것이었습니다. 둘 중 하나만 고치면 여전히
+날아갑니다.
+
+#### 8-A. Fixed joint 가 "이미 어긋난 채로" 생성된다 (기하 문제)
+
+측정 방법: `assets/srb_assets/robot/manipulator/canadarm3_large.usdz` 의 joint
+origin / axis 를 읽어 초기 관절각(50°, 0°, 55°, 75°, -30°, 0°, 0°)으로 FK 를
+직접 계산했습니다.
+
+| 시점 | flange (`canadarm3_large_7` + `(0,0,-0.44)`) 위치 | 그리퍼 root 위치 | 어긋남 |
+|---|---|---|---|
+| spawn 직후 (관절 전부 0, USD rest 자세) | `(1.045, -0.635, -0.029)` | `(0, 0, -0.44)` | **1.29 m** |
+| reset 이후 (지정된 초기 자세) | `(0.567, 0.888, 4.850)` | `(0, 0, -0.44)` | **5.39 m** |
+
+그리퍼 root 가 `(0, 0, -0.44)` 인 이유는 `env_cfg.py` 의 `_add_robot()` 이
+end-effector 의 `init_state.pos` 를 **flange 기준 오프셋** 값(`frame_flange.offset`
+∘ `frame_mount.offset` = `(0,0,-0.44)`)으로 그대로 써 버리기 때문입니다. 이 값은
+env 원점 기준으로 해석되므로, 팔이 조금이라도 뻗어 있으면 그리퍼는 항상 엉뚱한
+곳에 스폰됩니다. → PhysX 가 찍는
+`found a joint with disjointed body transforms` 경고의 정체입니다.
+
+`_update_assembly_fixed_joint_transforms()` 가 매 reset 마다 이걸 바로잡지만,
+
+1. 그 함수는 **`_reset_idx()` 안에서만** 호출됩니다. 그런데 물리는 이미
+   `DirectRLEnv.__init__` 안의 `sim.reset()` 시점부터 살아 있습니다. 즉
+   *첫 reset 이전에* 1.29 m 어긋난 fixed joint 로 물리가 몇 스텝 돌아갑니다.
+2. 옮기기만 하고 **속도를 지우지 않아서**, 그 사이에 스냅으로 얻은 속도를
+   그대로 들고 제자리로 순간이동합니다. 그 운동량은 다시 fixed joint 로
+   들어갑니다.
+
+- **해결** (`impl.py`):
+  - `_align_joint_assemblies()` 헬퍼로 분리 (kinematics 전파 → 배치 → **속도 0**).
+  - `_reset_idx()` 뿐 아니라 **`__post_init__()` 에서도 1회 호출**. 이제 물리가
+    처음 도는 순간부터 joint 위반이 0 입니다.
+  - 초기화 시 `Assembly 'end_effector': attached body moved by up to X m onto its
+    mount frame` 로그를 남겨, 실행 로그만 보고 배치가 실제로 일어났는지 확인할 수
+    있게 했습니다. (예상 출력: `1.29 m`)
+- **주의**: `disjointed body transforms` 경고 자체는 joint 가 *생성되는* 순간
+  (`_setup_scene`) 에 찍히므로 **여전히 한 번 출력될 수 있습니다**. 중요한 것은
+  경고의 유무가 아니라 Play 후에 스냅이 일어나지 않는 것입니다.
+
+#### 8-B. 4.2배 스케일 그리퍼의 게인이 실제 관성보다 10⁶배 크다 (물리 문제)
+
+`kinova300.usdz` 를 열어 실제로 author 된 값을 확인했습니다.
+
+| 링크 | `physics:mass` | `physics:diagonalInertia` |
+|---|---|---|
+| `base` | **0.99 kg** | `(3.45e-4, 3.45e-4, 5.82e-4)` |
+| `link_finger_[1-3]`, `link_finger_tip_[1-3]` (6개) | **0.01 kg** 씩 | `(7.9e-7, 7.9e-7, 8e-8)` |
+
+핵심: **`mass_props=MassPropertiesCfg(density=1000.0)` 은 아무 일도 하지
+않았습니다.** UsdPhysics 는 `physics:mass` 가 author 되어 있으면 density 를
+무시합니다. `scale=(4.2,4.2,4.2)` 도 지오메트리만 키울 뿐 author 된 mass /
+inertia 를 바꾸지 않습니다. 즉 **그리퍼는 74배 무거워진 적이 없습니다.**
+
+그런데 게인은 "74배 무거워졌으니까" 라는 전제로 1000배가 되어 있었습니다.
+
+```
+stiffness = 1_200_000,  damping = 10_000,  effort_limit_sim = 2000
+```
+
+관성 `I = 7.9e-7 kg·m²` 인 손가락에 clamp 된 2000 N·m 이 한 번 걸리면, 물리 dt
+(`env_rate = 1/150 s`) 한 스텝에
+
+```
+Δω = 2000 × (1/150) / 7.9e-7 ≈ 1.7 × 10⁷ rad/s
+```
+
+가 됩니다. 게다가 `solver_velocity_iteration_count = 0` 이라 이 속도를 보정할
+기회조차 없고, 손가락의 반작용 토크는 assembler fixed joint 를 타고 팔 전체로
+전달됩니다. **그리퍼를 전혀 조작하지 않아도** 8-A 의 스냅이 만든 아주 작은 관절
+오차 하나면 폭발이 시작됩니다.
+
+- **해결** (`kinova_gripper.py`, `Kinova300Large`):
+
+  | 항목 | 이전 | 이후 | 근거 |
+  |---|---|---|---|
+  | `stiffness` | 1,200,000 | **5,000** | 실제 관성(1배 그리퍼와 동일)에 맞춤 |
+  | `damping` | 10,000 | **100** | 위와 동일, 과감쇠 유지 |
+  | `effort_limit_sim` | 2000 | **50** | 50 N·m ÷ (4.2 × 0.044 m) ≈ 270 N 파지력 |
+  | `velocity_limit_sim` | (없음) | **5.0 rad/s** | PhysX 레벨 속도 상한 = 발산 불가능 |
+  | `solver_velocity_iteration_count` | 0 | **1** | 속도 오차 보정 활성화 |
+  | `mass_props` | `density=1000` | **제거** | no-op 인데 게인을 정당화하는 착시를 줌 |
+
+  Canadarm3 에도 `velocity_limit_sim=5.0` 을 추가했습니다 (`effort_limit_sim` 만
+  있고 속도 상한이 없었습니다).
+- **파지력이 부족하면**: `effort_limit_sim` 을 먼저 올리고 (50 → 100 → 200),
+  `stiffness`/`damping` 비(50:1)는 유지하세요. `velocity_limit_sim` 은 그대로
+  두는 것이 안전합니다.
+
+---
+
+### 문제 9 — 위성(VenusExpress) 충돌체와 팔 붐(link 3)이 스친다
+
+- **측정**: VenusExpress 메시 정점 271,478개를 `scale=3.4`, `yaw=90°`,
+  `pos=(-1.65, 0, -1.05)` 로 변환한 뒤, 초기 자세의 각 링크 박스와 거리 계산.
+
+  | 링크 | 위성까지 최소 거리 |
+  |---|---|
+  | `canadarm3_large_0` (베이스) | 0.268 m |
+  | `canadarm3_large_1` | 0.386 m |
+  | `canadarm3_large_2` | 0.473 m |
+  | `canadarm3_large_3` (붐) | **0.000 m** (정점 6개가 최대 1.4 mm 침투) |
+  | `canadarm3_large_4` 이상 | 2.3 m 이상 |
+
+  즉 "**베이스가 위성 안에 파묻혀 있다**" 는 사실이 아닙니다 (27 cm 떠 있음).
+  다만 **붐이 태양전지판을 스칩니다.**
+- **왜 문제인가**: 위성은 `disable_rigid_body=True` 로 스폰되는 **정적 충돌체**
+  입니다. 정적 충돌체가 dynamic 링크와 겹치면 PhysX 는 Play 즉시 밀어냅니다
+  (`max_depenetration_velocity=5.0`). 깊이가 얕아 폭발의 주원인은 아니지만,
+  수동 파지 테스트에서 팔이 알 수 없이 밀리는 원인이 됩니다.
+- **해결** (`task.py`): 위성 scenery 의 충돌을 끕니다.
+
+  ```python
+  scenery.asset_cfg.spawn.collision_props = CollisionPropertiesCfg(
+      collision_enabled=False
+  )
+  ```
+
+  Canadarm3 베이스는 위성에 볼트로 붙은 것이 아니라 **자체 `root_joint` 로 월드에
+  고정**되어 있으므로, 위성 충돌체는 이 태스크에서 아무 역할도 하지 않습니다.
+  (충돌을 되살리려면 이 한 줄을 지우면 됩니다.)
+
+---
+
+### 문제 10 — 그리퍼가 플랜지 안으로 4.1 cm 들어가 있다 (시각 문제, 물리 무해)
+
+- **측정**: `kinova300.usdz` 의 `base` 링크 지오메트리는 마운트 평면보다 **9.7 mm
+  뒤쪽**까지 나와 있습니다. `scale=4.2` 를 곱하면 **41 mm**. `canadarm3_large_7`
+  의 메시는 자기 프레임에서 `z ∈ [-0.441, 0]` 이고 마운트는 `z = -0.44` 이므로,
+  그리퍼 뒷면이 플랜지 안으로 41 mm 들어갑니다.
+- **물리적으로는 무해합니다**: assembler 가
+  `mask_all_collisions=True` 로 `{ENV}/robot` ↔ `{ENV}/end_effector` **전체 서브트리**
+  충돌을 필터링합니다 (`RobotAssembler.mask_collisions()` → `FilteredPairsAPI`).
+  따라서 겹쳐도 척력이 발생하지 않고, "충돌 척력 vs fixed joint 상충" 은
+  일어나지 않습니다. 실제 로그에도 접촉 관련 에러는 없었습니다.
+- **시각적으로 거슬린다면**: `canadarm3.py` 의
+  `frame_flange.offset.pos` 를 `(0, 0, -0.44)` → `(0, 0, -0.48)` 로 바꾸면 딱
+  붙습니다. 단 TCP 도 4 cm 같이 밀리므로, 이미 맞춰 둔 파지 위치가 있으면
+  그대로 두는 편이 낫습니다. (스케일을 키운 것은 그리퍼 지오메트리뿐이고 마운트
+  오프셋 0.44 는 1배 기준 값이라 생긴 차이입니다.)
+- **함께 수정**: `frame_tool_centre_point` 가 `0.64` (= 0.16 × **4**) 로 되어 있어
+  실제 스케일 4.2 와 어긋났습니다 → `0.672` (= 0.16 × 4.2) 로 수정. TCP 가 3.2 cm
+  짧게 잡혀 IK 목표와 `G` 진단의 TCP↔MEP 거리가 그만큼 틀어져 있었습니다.
+
+---
+
+### 가설 검증 요약 — 제기된 6가지 원인 진단
+
+정밀 분석 요청으로 받은 6개 가설을 USD / IsaacLab 소스 기준으로 하나씩
+검증했습니다. **3개는 사실이 아니어서 수정하지 않았습니다.**
+
+| # | 가설 | 판정 | 근거 |
+|---|---|---|---|
+| 1 | 로봇 베이스 미고정 (`fix_root_link` 누락) | ❌ **사실 아님** | `canadarm3_large.usdz` 에 `canadarm3_large_0/root_joint` (`PhysicsFixedJoint`, `body0=[]` = world) 가 이미 있음. 이전에 직접 시도해 보고 "변화 없음"으로 되돌린 기록도 있음 (문제 6). 넣어도 이미 켜진 joint 를 다시 켜는 no-op |
+| 2 | 베이스가 위성 충돌체에 파묻혀 스폰 | ⚠️ **부분적으로 사실** | 베이스는 27 cm 떠 있음. 대신 **붐(link 3)** 이 태양전지판을 1.4 mm 스침 → 위성 충돌 비활성화로 조치 (문제 9) |
+| 3 | 그리퍼-플랜지 침투와 fixed joint 의 상충 | ❌ **사실 아님** (침투는 사실) | 41 mm 침투는 맞지만 `mask_all_collisions=True` 가 서브트리 전체 충돌을 필터링하므로 척력 자체가 없음 (문제 10) |
+| 4 | `write_root_pose_to_sim` 후 `write_data_to_sim` 누락 | ❌ **사실 아님** | IsaacLab 의 `write_root_pose_to_sim()` 은 버퍼가 아니라 `root_physx_view.set_root_transforms()` 로 **즉시** PhysX 에 씀. `write_data_to_sim()` 은 actuator/force 버퍼용이고, `DirectRLEnv.reset()` 이 `_reset_idx()` 직후에 이미 호출함. 실제 어긋남도 15 m 가 아니라 **5.39 m** (문제 8-A) |
+| 5 | 4.2배 그리퍼의 초고강성 + `solver_velocity_iteration_count=0` | ✅ **사실 (핵심 원인)** | 다만 이유가 다름: 질량이 74배가 된 적이 없음 (author 된 `physics:mass` 가 density 를 이김). 그래서 게인은 74배가 아니라 **10⁶배** 과한 상태였음 (문제 8-B) |
+| 6 | 플랜지-마운트 쿼터니언 뒤틀림 | ❌ **사실 아님 (의도된 값)** | `Ry(180) @ Rx(180) = Rz(180)` → **Z 축은 그대로**. 그리퍼 지오메트리는 `base` 의 -Z 로 자라고 플랜지 면도 link7 의 -Z 이므로 이 합성이 있어야 그리퍼가 팔 바깥을 향함. 남는 180° 는 3개 손가락 중 어느 것이 어디로 갈지만 정함 (대칭이라 무의미). "정렬" 하면 오히려 방향이 틀어짐 |
 
 ---
 
@@ -581,6 +757,28 @@ srb agent manual --env debris_capture_visual \
   env.robot=canadarm3+kinova300_large
 ```
 
+### Test 0 — Play 폭발 재발 여부 (문제 8/9 수정 후 가장 먼저 확인)
+
+실행 로그에서 먼저 확인할 것:
+
+```
+[INFO] Assembly 'end_effector': attached body moved by up to 1.29 m onto its mount frame
+```
+
+- 이 줄이 보이지 않으면 배치가 아예 안 된 것입니다 (`joint_assemblies` 비었거나
+  `physics_sim_view` 가 None). 그대로 보고해 주세요.
+- 값이 `1.29 m` 근처면 계산과 일치합니다.
+- `found a joint with disjointed body transforms` 경고는 joint 가 **생성되는**
+  순간에 찍히므로 한 번 더 나올 수 있습니다. 판단 기준은 경고가 아니라 아래
+  거동입니다.
+
+| 확인 항목 | 기대 결과 | 결과 |
+|---|---|---|
+| Play 직후 5초 대기 (키 입력 없음) | 팔·그리퍼가 **전혀 움직이지 않음** | 미실행 |
+| 그리퍼 손가락 | 자동으로 열리거나 닫히지 않음 | 미실행 |
+| 팔이 위성에 밀리는지 | 밀림 없음 | 미실행 |
+| `G` 진단의 debris `\|v\|` | 0.000 유지 | 미실행 |
+
 ### Test 1 — Simulation 초기 상태
 - 자동 Play 안 함: 미실행
 - Robot 초기 정지 (Play 전): 미실행
@@ -622,9 +820,25 @@ srb agent manual --env debris_capture_visual \
    그 경우 `mep_combined.usd` 의 reference 를 저장소 내 상대경로
    (`../../assets/space_asset/mep.usd` 기준)로 다시 저장해야 합니다.
 2. **`Failed to apply action:` 로그 원문** — 있으면 전문을 7절 문제 2 에 추가.
-3. **`gripper_fixture` 실제 치수 대비 그리퍼 개폐 폭** —
+3. **MEP 가 팔의 도달 범위 밖에 있음 (실측)** — 폭발이 잡히고 나면 바로 마주칠
+   문제입니다.
+
+   | 항목 | 값 |
+   |---|---|
+   | Canadarm3 최대 도달 거리 (베이스 기준, USD joint origin 합산) | 약 **8.5 m** |
+   | 초기 자세의 flange 위치 | `(0.567, 0.888, 4.850)` |
+   | MEP `init_state.pos` | `(-0.106, 13.902, 11.829)` |
+   | 베이스 ↔ MEP 거리 | **18.2 m** |
+   | flange ↔ MEP 거리 | **14.8 m** |
+
+   즉 현재 배치로는 관절을 어떻게 움직여도 MEP 에 닿을 수 없습니다.
+   (`task.py` 의 `termination_debris_too_far` 임계값도 10 m 입니다.)
+   `self.scene.debris` 의 `init_state.pos` 를 flange 근처 — 예: `y` 를 13.9 →
+   4~5 m 대로 — 옮겨야 Step 8 수동 파지 테스트가 가능합니다. 원래 배치를
+   유지하라는 요구가 있어 **값은 바꾸지 않았습니다.**
+4. **`gripper_fixture` 실제 치수 대비 그리퍼 개폐 폭** —
    `G` 의 TCP↔MEP 거리와 collision 표시로 판단. 손가락이 손잡이를 감싸기에
    너무 크거나 작으면 `Kinova300Large.asset_cfg.spawn.scale` 또는
    debris 의 `scale` 조정이 필요하지만, 기존 배치를 유지하라는 요구에 따라
    **먼저 실측한 뒤에** 판단합니다.
-4. **convexDecomposition 으로 충분한지** — 부족하면 `sdf` 로 상향.
+5. **convexDecomposition 으로 충분한지** — 부족하면 `sdf` 로 상향.

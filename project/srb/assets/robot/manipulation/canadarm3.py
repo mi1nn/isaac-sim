@@ -39,6 +39,11 @@ class Canadarm3(SerialManipulator):
                 disable_gravity=True,
                 max_depenetration_velocity=5.0,
             ),
+            ## NOTE: `fix_root_link` is deliberately absent. `canadarm3_large.usdz`
+            ## already authors `/canadarm3_large/canadarm3_large_0/root_joint`
+            ## (a PhysicsFixedJoint with an empty `body0`, i.e. fixed to the world), so
+            ## the base is anchored either way and the flag would only re-enable a joint
+            ## that is already enabled.
             articulation_props=ArticulationRootPropertiesCfg(
                 enabled_self_collisions=False,
                 solver_position_iteration_count=12,
@@ -59,9 +64,12 @@ class Canadarm3(SerialManipulator):
         actuators={
             "joints": ImplicitActuatorCfg(
                 joint_names_expr=["canadarm3_large_joint_[1-7]"],
-                ## NOTE: `velocity_limit` is deliberately absent -- implicit actuators
-                ## never applied it, so it only produced a deprecation warning.
+                ## NOTE: `velocity_limit` (the deprecated name) was never applied by
+                ## implicit actuators -- it only produced a deprecation warning. The
+                ## `*_sim` variants below do reach PhysX, and the velocity ceiling is
+                ## what keeps a bad step from turning into a diverging one.
                 effort_limit_sim=2500.0,
+                velocity_limit_sim=5.0,
                 stiffness=40000.0,
                 damping=25000.0,
             ),
