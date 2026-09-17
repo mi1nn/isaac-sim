@@ -67,6 +67,14 @@ class SceneCfg(ManipulationSceneCfg):
             usd_path=SRB_ASSETS_DIR_SPACE.joinpath("satellite_v3.usd").as_posix(),
             scale=(2.0, 2.0, 2.0),
             collision_props=CollisionPropertiesCfg(),
+            ## NOTE: The GOES_R meshes author no collision approximation, which PhysX
+            ## rejects on a dynamic body (one error per mesh) before silently falling
+            ## back to convexHull. Requesting convexHull explicitly keeps the exact same
+            ## collision behaviour without the error spam. This is background scenery,
+            ## so a hull per mesh is accurate enough and far cheaper than decomposition.
+            mesh_collision_props=MeshCollisionPropertiesCfg(
+                mesh_approximation="convexHull"
+            ),
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),
         ),

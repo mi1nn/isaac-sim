@@ -320,6 +320,9 @@ srb agent manual --env debris_capture_visual \
 | `project/srb/__main__.py` | `srb agent manual` 서브커맨드 및 `--joint_step`, `--autoplay` 인자 등록 | CLI 노출 |
 | `project/srb/__main__.py` | 기본 `L → env.reset` 키 바인딩 대상에서 `manual` 제외 | `manual` 이 자체적으로 `L` 을 바인딩 (reset + target 재동기화) |
 | `docs/debris_capture_environment_setup.md` | **신규 파일**. 이 작업 로그 | 요구사항 12 |
+| `project/srb/core/env/common/base/direct/impl.py` | `_reset_idx` 에서 `_update_assembly_fixed_joint_transforms` 호출 **직전**에 `physics_sim_view.update_articulations_kinematic()` 추가 | reset 이 쓴 관절 위치가 link transform 에 반영되기 전에 flange 포즈를 읽어 그리퍼를 엉뚱한 곳에 배치 → Play 시 fixed joint 가 폭발적으로 스냅 (문제 6) |
+| `project/srb/tasks/manipulation/debris_capture/task.py` | satellite spawn 에 `mesh_collision_props=MeshCollisionPropertiesCfg(mesh_approximation="convexHull")` 추가 | GOES_R 메시 25개가 approximation 없이 dynamic body 에 붙어 PhysX 에러를 25줄씩 뱉음 (문제 7) |
+| `project/srb/assets/robot/manipulation/canadarm3.py`, `project/srb/assets/object/tool/kinova_gripper.py` | `effort_limit` → `effort_limit_sim`, `velocity_limit` 제거 | Isaac Lab deprecation 경고 제거. implicit actuator 는 `velocity_limit` 을 애초에 쓰지 않으므로 거동 변화 없음 (문제 7) |
 
 ---
 
@@ -405,6 +408,91 @@ srb agent manual --env debris_capture_visual \
 - **원인**: USD 저장 시 절대경로로 기록됨. 저장소 내 `assets/space_asset/mep.usd`
   와 별개 경로.
 - **해결**: 미적용 — Isaac Sim 머신에서 해당 경로 존재 여부 확인 후 판단.
+- **검증**: 미실행
+
+### 문제 6 — Play 를 누르면 로봇팔이 이리저리 움직이다 1초 안에 튕겨나감
+
+- **현상**: `srb agent manual` 로 PAUSED 진입까지는 정상. 아무 키도 누르지 않고
+  Play 를 누르면 팔+그리퍼가 잠깐 이리저리 떨리다가 1초도 안 되어 화면 밖으로
+  날아감. 위성과 MEP 는 제자리에 그대로 있음.
+- **기각된 가설**: "Canadarm3 베이스가 고정되어 있지 않다" 라고 추정해
+  `fix_root_link = True` 를 넣어봤으나 변화 없었고, USD 를 직접 열어보니
+  `canadarm3_large.usdz` 에는 이미
+  `/canadarm3_large/canadarm3_large_0/root_joint [PhysicsFixedJoint] body0=[]`
+  (= world 고정) 이 들어 있었습니다. **베이스는 원래부터 고정**이었고
+  `fix_root_link` 는 이미 켜져 있는 joint 를 다시 켜는 no-op 였습니다.
+  → 해당 설정은 되돌렸습니다.
+- **결정적 단서 (터미널 로그)**:
+  ```
+  [Warning] [omni.physx.plugin] PhysicsUSD: CreateJoint - found a joint with
+  disjointed body transforms, the simulation will most likely snap objects
+  together: /World/envs/env_0/end_effector/base/AssemblerFixedJoint
+  ```
+  팔 flange 와 그리퍼를 잇는 fixed joint 의 양쪽 바디가 **서로 다른 위치**에
+  있다는 뜻입니다. PhysX 는 Play 순간 이 위반을 해소하려고 두 바디를 강제로
+  끌어당기고, 그 충격이 팔 전체를 튕겨냅니다.
+- **원인**: `_update_assembly_fixed_joint_transforms` (`impl.py:482-540`) 는 바로
+  이 스냅을 막으려고 reset 마다 그리퍼를 flange 위치로 옮깁니다. 그런데 이
+  함수는 `base_asset.data.body_state_w` 로 flange 의 **현재 포즈**를 읽습니다.
+  - reset 이벤트(`reset_scene`)는 관절 위치를 `write_joint_position_to_sim` →
+    `root_physx_view.set_dof_positions()` 로 씁니다.
+  - `set_dof_positions()` 는 DOF 값만 바꿀 뿐 **link transform 을 다시 계산하지
+    않습니다.** 갱신은 `physics_sim_view.update_articulations_kinematic()` 이나
+    다음 물리 스텝에서 일어납니다.
+  - `DirectRLEnv.reset()` 은 `_reset_idx()` → `write_data_to_sim()` →
+    `sim.forward()` 순서라, `sim.forward()` (= kinematic 갱신) 가
+    `_update_assembly_fixed_joint_transforms` 보다 **나중**입니다.
+  - 따라서 읽히는 flange 포즈는 관절이 모두 0 인 **spawn 시점의 값**입니다.
+    Canadarm3 의 초기 자세는 50°/55°/75°/-30° 로 크고 팔 자체가 길어서,
+    실제 flange 위치와 spawn 시점 위치의 차이가 수 m 단위입니다.
+    그리퍼가 그만큼 엉뚱한 곳에 놓이고 → joint 위반 → Play 시 폭발.
+  - 이 코드는 모든 매니퓰레이션 태스크가 공유하지만, 초기 관절 각도가 0 에
+    가까운 다른 로봇들은 오차가 작아 조용히 넘어갔습니다. Canadarm3 만
+    터진 이유입니다.
+- **해결**: `impl.py` 의 `_reset_idx` 에서 `_update_assembly_fixed_joint_transforms`
+  를 호출하기 **직전**에 kinematics 를 전파합니다.
+
+  ```python
+  if self.joint_assemblies:
+      if self.sim.physics_sim_view is not None:
+          self.sim.physics_sim_view.update_articulations_kinematic()
+      self._update_assembly_fixed_joint_transforms(env_ids)
+  ```
+
+  이제 flange 포즈가 reset 된 관절 자세를 반영하므로 그리퍼가 정확한
+  마운트 위치에 놓이고, fixed joint 위반이 0 이 되어 스냅이 사라집니다.
+- **검증**: 미실행
+
+### 문제 7 — 실행 시 PhysX 에러 / deprecation 경고 다수 출력
+
+- **현상**:
+  1. `PhysicsUSD: Parse collision - triangle mesh collision (approximation
+     None/MeshSimplification) cannot be a part of a dynamic body, falling back to
+     convexHull approximation: /World/envs/env_0/satellite/GOES_R/...` — 메시마다
+     한 줄씩, 25줄 이상.
+  2. `The <ImplicitActuatorCfg> object has a value for 'effort_limit' /
+     'velocity_limit'. This parameter will be removed in the future...` — 4줄.
+- **원인**:
+  1. `satellite.usd` 의 GOES_R 메시들은 collision approximation 이 author 되어
+     있지 않은데 `/GOES_R` 에 `PhysicsRigidBodyAPI` 가 있어 dynamic body 입니다.
+     PhysX 는 dynamic body 의 triangle mesh 를 거부하고 convexHull 로 떨어뜨리며
+     그때마다 에러를 찍습니다. task cfg 의 satellite spawn 에는
+     `mesh_collision_props` 가 없었습니다 (debris 에만 있었음).
+  2. Isaac Lab 이 `effort_limit` / `velocity_limit` 을 `*_sim` 으로 이관 중입니다.
+     특히 `velocity_limit` 은 implicit actuator 에서 **원래 쓰이지 않습니다**.
+- **해결**:
+  1. satellite spawn 에 `mesh_collision_props=MeshCollisionPropertiesCfg(
+     mesh_approximation="convexHull")` 추가. PhysX 가 어차피 쓰던 근사를 명시만
+     한 것이라 **거동 변화 없이** 에러만 사라집니다. 배경 소품이므로
+     convexDecomposition 까지 갈 필요는 없습니다.
+  2. `effort_limit` → `effort_limit_sim` (implicit actuator 에서 동등),
+     `velocity_limit` 은 제거 (미사용이므로 거동 변화 없음).
+- **남은 경고 (무해)**:
+  - `mep.usd` 의 `Cylinder_01.material:binding` 이 참조 범위 밖의
+    `</Looks/OmniPBR_Disc_Cylinder>` 를 가리켜 무시됨 → 해당 실린더만 기본 머티리얼로
+    보입니다. 물리와 무관.
+  - `A prim already exists at prim path: ...` → Isaac Lab 이 기존 prim 을 재사용하며
+    cfg 를 덮어씁니다. 정상 경로입니다.
 - **검증**: 미실행
 
 ---

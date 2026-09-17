@@ -48,8 +48,7 @@ class Kinova300Large(ActiveTool):
         actuators={
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=[".*_finger_[1-3]", ".*_finger_tip_[1-3]"],
-                velocity_limit=100.0,
-                effort_limit=2000.0,        # 2.0 × 10³
+                effort_limit_sim=2000.0,    # 2.0 × 10³
                 stiffness=1_200_000.0,      # 1200 × 10³
                 damping=10_000.0,           # 감쇠비 유지
             ),

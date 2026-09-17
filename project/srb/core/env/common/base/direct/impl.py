@@ -285,7 +285,16 @@ class DirectEnv(__DirectRLEnv, metaclass=__PostInitCaller):
         super()._reset_idx(env_ids)
 
         # Move assembled bodies to the correct position to avoid physics snapping them in place
-        self._update_assembly_fixed_joint_transforms(env_ids)
+        if self.joint_assemblies:
+            # The reset events write joint positions with `set_dof_positions`, which does not
+            # recompute the link transforms PhysX reports. Without propagating the kinematics
+            # first, the mount frame read below is still the spawn-time one, so the attached
+            # body gets placed where its fixed joint cannot hold it and PhysX tears the
+            # assembly apart as soon as physics starts.
+            if self.sim.physics_sim_view is not None:
+                self.sim.physics_sim_view.update_articulations_kinematic()
+
+            self._update_assembly_fixed_joint_transforms(env_ids)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         if self.cfg.actions:
