@@ -124,18 +124,26 @@ class MepHandleGrasp(Node):
         p("mount_rpy_gripper", [180.0, 0.0, 0.0])
         p("camera_pos_link7", [0.0, 0.0, -1.1])
         p("camera_rpy_link7", [0.0, 0.0, -90.0])  # USD/OpenGL camera convention
-        p("tcp_offset", 0.62)  # grasp point along the gripper -Z axis [m]
+        # Grasp point (where the pin centre should end up) along the gripper -Z axis [m].
+        # Fingers (Kinova300Large, scale 4.2): knuckles at ~0.48 m, tips at ~0.61 m, so the
+        # pin (radius 0.075 m) is centred between them instead of at/after the tips
+        p("tcp_offset", 0.55)
         # Detection (OpenCV HSV: H in [0, 180])
         p("hsv_lower", [45, 120, 60])
         p("hsv_upper", [75, 255, 255])
         p("min_pixels", 12)
         p("max_depth", 30.0)
         p("estimate_smoothing", 0.3)  # EMA weight of a new measurement
+        # Depth only sees the front half of the pin, whose mean lies pi*r/4 in front of
+        # the axis -> push the estimate back along the viewing ray (0 disables it)
+        p("handle_radius", 0.075)
         # Control
         p("control_rate", 20.0)
         p("ik_lin_gain", 0.17)  # [m/s] of motion per unit of IK action
         p("ik_rot_gain", 0.17)  # [rad/s] of motion per unit of IK action
-        p("ik_control_point", 0.01)  # IK body offset along gripper -Z [m]
+        # IK body offset along the gripper -Z axis [m]; must match
+        # `srb/utils/mep.py` (flange -> Kinova base -> KINOVA_TCP_DISTANCE = 0.16 * 4.2)
+        p("ik_control_point", 0.672)
         p("max_action", 1.0)
         p("kp_lin", 0.6)
         p("kp_rot", 0.8)
@@ -147,6 +155,7 @@ class MepHandleGrasp(Node):
         p("approach_pos_tol", 0.05)
         p("approach_ang_tol_deg", 6.0)
         p("lock_distance", 0.9)  # stop updating the estimate when closer than this
+        p("final_timeout", 240.0)  # [s] FINAL without reaching the pin -> back to APPROACH
         p("grasp_pos_tol", 0.03)
         p("close_duration", 3.0)
         # Grasp check: pull back with the gripper closed and compare the MEP motion
@@ -158,12 +167,14 @@ class MepHandleGrasp(Node):
         p("lost_timeout", 2.0)
         p("detections_to_start", 3)
         # Search
-        # The arm orbits 360 deg about the base axis (moving the TCP along the arc) while
-        # looking outwards; each full orbit uses the next pitch of the camera
-        p("search_rate", 0.1)  # [rad/s] orbit rate about the base axis
+        # The arm swings about the base axis (moving the TCP along the arc) while looking
+        # outwards: first towards +sweep, then back to -sweep, then the next camera pitch.
+        # Sweeping both ways (instead of full orbits) keeps joint 1 within +-2pi, which is
+        # the PhysX limit for revolute drive targets
+        p("search_sweep_deg", 180.0)
+        p("search_lead_deg", 20.0)  # the target always leads the actual azimuth
+        p("search_max_rot_vel", 0.15)
         p("search_pitch_steps_deg", [0.0, 30.0, -30.0])
-        p("search_track_tol", 0.25)  # [m] the orbit only advances while tracking well
-        p("search_track_ang_deg", 20.0)
         p("reacquire_duration", 10.0)  # [s] look at the last known handle pose first
         # Debug
         p("publish_debug_image", True)
@@ -212,8 +223,10 @@ class MepHandleGrasp(Node):
         self._locked = False
         self._final_dir: Optional[np.ndarray] = None
         self._retreat_start: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        # Locked handle pose expressed in the MEP frame (follows the MEP if it is pushed)
+        self._locked_in_mep: Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = None
         self._search_origin: Optional[Tuple[np.ndarray, np.ndarray]] = None
-        self._search_yaw = 0.0
+        self._search_dir = 1.0
         self._search_pitch_idx = 0
 
         self.create_timer(1.0 / g("control_rate"), self._step)
@@ -279,18 +292,36 @@ class MepHandleGrasp(Node):
                     self._set_state(State.FINAL)
 
         elif self._state == State.FINAL:
-            d = self._final_dir
+            mep = self._lookup(self._g("mep_frame"))
             if not self._locked and np.linalg.norm(
                 self._handle_pos - self._camera_pos(p_g, R_g)
             ) < self._g("lock_distance"):
                 self._locked = True
+                if mep is not None:
+                    p_m, R_m = mep
+                    self._locked_in_mep = (
+                        R_m.T @ (self._handle_pos - p_m),
+                        R_m.T @ self._final_dir,
+                        R_m.T @ self._handle_axis if self._handle_axis is not None else None,
+                    )
                 self.get_logger().info(
                     f"Handle estimate locked at {np.round(self._handle_pos, 3)}"
                 )
+            if self._locked_in_mep is not None and mep is not None:
+                # Contact may push the free-floating MEP -> keep the target attached to it
+                p_m, R_m = mep
+                self._handle_pos = p_m + R_m @ self._locked_in_mep[0]
+                self._final_dir = normalize(R_m @ self._locked_in_mep[1])
+                if self._locked_in_mep[2] is not None:
+                    self._handle_axis = normalize(R_m @ self._locked_in_mep[2])
+            d = self._final_dir
             goal = self._handle_pos
             v, w = self._servo(tcp, p_g, R_g, goal, d, self._g("final_lin_vel"))
             if np.linalg.norm(goal - tcp) < self._g("grasp_pos_tol"):
                 self._set_state(State.CLOSE)
+            elif (now - self._state_since) > Duration(seconds=self._g("final_timeout")):
+                self.get_logger().warn("FINAL timed out -> re-approaching")
+                self._set_state(State.APPROACH)
 
         elif self._state == State.CLOSE:
             if (now - self._state_since) > Duration(seconds=self._g("close_duration")):
@@ -365,13 +396,8 @@ class MepHandleGrasp(Node):
         R_cam = R_g @ self._R_g_cam
         p_cam = p_g + R_g @ self._p_g_cam
         points = points_cam @ R_cam.T + p_cam
-        centroid = points.mean(axis=0)
 
         alpha = self._g("estimate_smoothing")
-        if self._handle_pos is None or self._detection_streak == 0:
-            self._handle_pos = centroid
-        else:
-            self._handle_pos = (1 - alpha) * self._handle_pos + alpha * centroid
         axis = self._pin_axis(points)
         if axis is not None:
             if self._handle_axis is not None and np.dot(axis, self._handle_axis) < 0:
@@ -381,6 +407,17 @@ class MepHandleGrasp(Node):
                 if self._handle_axis is None
                 else normalize((1 - alpha) * self._handle_axis + alpha * axis)
             )
+
+        centroid = points.mean(axis=0)
+        ray = centroid - p_cam
+        if self._handle_axis is not None:
+            ray = ray - np.dot(ray, self._handle_axis) * self._handle_axis
+        centroid = centroid + normalize(ray) * (math.pi * self._g("handle_radius") / 4.0)
+
+        if self._handle_pos is None or self._detection_streak == 0:
+            self._handle_pos = centroid
+        else:
+            self._handle_pos = (1 - alpha) * self._handle_pos + alpha * centroid
 
         self._detection_streak += 1
         self._last_detection_time = self.get_clock().now()
@@ -499,44 +536,54 @@ class MepHandleGrasp(Node):
             )
             return np.zeros(3), w
 
-        # 2) Orbit search about the base axis
+        # 2) Sweep search about the base axis
         base = self._lookup(self._g("base_frame"))
         base_pos = base[0] if base is not None else np.zeros(3)
         up = R_b[:, 2]
         if self._search_origin is None:
             self._search_origin = (tcp.copy(), approach.copy())
-            self._search_yaw = 0.0
+            self._search_dir = 1.0
             self._search_pitch_idx = 0
-            self.get_logger().info("Handle not visible -> orbit search")
+            self.get_logger().info("Handle not visible -> sweep search")
         tcp0, look0 = self._search_origin
 
-        R_yaw = self._axis_angle(up, self._search_yaw)
+        # Progress is measured on the actual look direction, so the target never runs
+        # away from an arm that cannot keep up (it simply leads by a fixed angle)
+        yaw = self._signed_azimuth(look0, approach, up)
+        limit = math.radians(self._g("search_sweep_deg"))
+        if self._search_dir > 0 and yaw >= limit - math.radians(2.0):
+            self._search_dir = -1.0
+            self.get_logger().info("Sweep reached +limit -> sweeping back")
+        elif self._search_dir < 0 and yaw <= -limit + math.radians(2.0):
+            self._search_dir = 1.0
+            steps = self._g("search_pitch_steps_deg")
+            self._search_pitch_idx = (self._search_pitch_idx + 1) % len(steps)
+            self.get_logger().info(
+                f"Sweep done -> camera pitch {steps[self._search_pitch_idx]} deg"
+            )
+        target_yaw = float(
+            np.clip(yaw + self._search_dir * math.radians(self._g("search_lead_deg")), -limit, limit)
+        )
+
+        R_yaw = self._axis_angle(up, target_yaw)
         goal = base_pos + R_yaw @ (tcp0 - base_pos)
         side = np.cross(look0, up)
         side = normalize(side if np.linalg.norm(side) > 1e-3 else R_b[:, 0])
         pitch = self._g("search_pitch_steps_deg")[self._search_pitch_idx]
         desired = R_yaw @ self._axis_angle(side, math.radians(pitch)) @ look0
 
-        # Advance along the orbit only while the arm keeps up with it
-        tracking = np.linalg.norm(goal - tcp) < self._g("search_track_tol") and math.degrees(
-            angle_between(approach, desired)
-        ) < self._g("search_track_ang_deg")
-        if tracking:
-            self._search_yaw += self._g("search_rate") / self._g("control_rate")
-            if self._search_yaw >= 2.0 * math.pi:
-                self._search_yaw -= 2.0 * math.pi
-                steps = self._g("search_pitch_steps_deg")
-                self._search_pitch_idx = (self._search_pitch_idx + 1) % len(steps)
-                self.get_logger().info(
-                    f"Orbit done -> camera pitch {steps[self._search_pitch_idx]} deg"
-                )
-
         v = clamp_norm(self._g("kp_lin") * (goal - tcp), self._g("max_lin_vel"))
         w = clamp_norm(
             self._g("kp_rot") * self._look_error(approach, desired, R_b),
-            self._g("max_rot_vel"),
+            self._g("search_max_rot_vel"),
         )
         return v, w
+
+    @staticmethod
+    def _signed_azimuth(a: np.ndarray, b: np.ndarray, up: np.ndarray) -> float:
+        a_p = a - np.dot(a, up) * up
+        b_p = b - np.dot(b, up) * up
+        return math.atan2(float(np.dot(up, np.cross(a_p, b_p))), float(np.dot(a_p, b_p)))
 
     @staticmethod
     def _look_error(approach: np.ndarray, desired: np.ndarray, R_b: np.ndarray) -> np.ndarray:
@@ -591,9 +638,12 @@ class MepHandleGrasp(Node):
         return p_g + R_g @ self._p_g_cam
 
     def _set_state(self, state: State):
+        if state in (State.SEARCH, State.APPROACH):
+            # Re-enable vision updates (the estimate is only frozen during FINAL)
+            self._locked = False
+            self._locked_in_mep = None
         if state == State.SEARCH:
             self._search_origin = None
-            self._locked = False
             self._detection_streak = 0
         self.get_logger().info(f"{self._state.value} -> {state.value}")
         self._state = state
