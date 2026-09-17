@@ -1,0 +1,40 @@
+## Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+## Virtual environments
+.venv
+
+## Rust
+debug/
+target/
+**/*.rs.bk
+
+## MdBook
+docs/book/
+docs/index.html
+
+## Docker History
+.docker/.history/
+
+## Shared Objects
+**/*.so
+
+## Apptainer
+**/*.sif
+
+## Logs
+*.log
+logs/
+outputs/
+wandb/
+
+## Offline SRB cache
+.cache
+
+## Dump files
+**/core.*

@@ -1,0 +1,44 @@
+[package]
+title = "Space Robotics Bench"
+description = "Regular experience for the Space Robotics Bench"
+version = "0.0.1"
+keywords = ["benchmark", "robotics", "simulation", "space"]
+
+
+[dependencies]
+## Basic UI
+"omni.kit.uiapp" = {}
+"omni.kit.window.stage" = {}
+
+## Menu bar
+"omni.kit.viewport.menubar.camera" = {}
+"omni.kit.viewport.menubar.display" = {}
+"omni.kit.viewport.menubar.lighting" = {}
+"omni.kit.viewport.menubar.render" = {}
+"omni.kit.viewport.menubar.settings" = {}
+
+## Property widgets
+"omni.kit.property.bundle" = {}
+
+## Basic manipulation
+"omni.kit.manipulator.camera" = {}
+"omni.kit.manipulator.prim" = {}
+"omni.kit.manipulator.selection" = {}
+
+## Inheritance
+"srb.headless" = {}
+
+
+[settings]
+## Extensions
+app.exts.folders = [
+    "${app}",
+    "${exe-path}/exts",
+    "${exe-path}/extscore",
+    "${exe-path}/../exts",
+    "${exe-path}/../extscache",
+    "${exe-path}/../extsPhysics",
+    "${exe-path}/../isaacsim/exts",
+    "${exe-path}/../isaacsim/extscache",
+    "${exe-path}/../isaacsim/extsPhysics",
+]
