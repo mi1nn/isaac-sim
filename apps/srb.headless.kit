@@ -1,0 +1,32 @@
+[package]
+title = "Space Robotics Bench | Headless"
+description = "Headless experience for the Space Robotics Bench"
+version = "0.0.1"
+keywords = ["benchmark", "robotics", "simulation", "space"]
+
+
+[dependencies]
+## Essentials
+"omni.kit.loop" = {}
+"omni.kit.viewport.rtx" = {}
+
+## Physics
+"omni.physx.bundle" = {}
+
+## Inheritance
+"srb.barebones" = {}
+
+
+[settings]
+## Extensions
+app.exts.folders = [
+    "${app}",
+    "${exe-path}/exts",
+    "${exe-path}/extscore",
+    "${exe-path}/../exts",
+    "${exe-path}/../extscache",
+    "${exe-path}/../extsPhysics",
+    "${exe-path}/../isaacsim/exts",
+    "${exe-path}/../isaacsim/extscache",
+    "${exe-path}/../isaacsim/extsPhysics",
+]

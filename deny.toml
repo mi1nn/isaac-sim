@@ -1,0 +1,51 @@
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "x86_64-unknown-linux-musl" },
+]
+all-features = true
+
+# Considered when running `cargo deny check advisories`
+# https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
+[advisories]
+ignore = [{ id = "RUSTSEC-2024-0320" }, { id = "RUSTSEC-2024-0436" }]
+
+# Considered when running `cargo deny check bans`
+# https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+deny = []
+skip = []
+skip-tree = []
+
+# Considered when running `cargo deny check licenses`
+# https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
+[licenses]
+private = { ignore = true }
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0 WITH LLVM-exception", # https://spdx.org/licenses/LLVM-exception.html
+    "Apache-2.0",                     # https://spdx.org/licenses/Apache-2.0.html
+    "BSD-2-Clause",                   # https://spdx.org/licenses/BSD-2-Clause.html
+    "BSD-3-Clause",                   # https://spdx.org/licenses/BSD-3-Clause.html
+    "CDLA-Permissive-2.0",            # https://spdx.org/licenses/CDLA-Permissive-2.0.html
+    "ISC",                            # https://spdx.org/licenses/ISC.html
+    "MIT",                            # https://spdx.org/licenses/MIT.html
+    "MPL-2.0",                        # https://spdx.org/licenses/MPL-2.0.html
+    "Unicode-3.0",                    # https://spdx.org/licenses/Unicode-3.0.html
+    "Zlib",                           # https://spdx.org/licenses/Zlib.html
+]
+exceptions = []
+[[licenses.clarify]]
+crate = "ring"
+expression = "ISC"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# Considered when running `cargo deny check sources`
+# https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+[sources.allow-org]
+github = ["AndrejOrsula"]
