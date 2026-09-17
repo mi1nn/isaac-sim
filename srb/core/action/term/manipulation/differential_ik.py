@@ -39,9 +39,9 @@ class DifferentialInverseKinematicsAction(__DifferentialInverseKinematicsAction)
 
     @property
     def jacobian_b(self) -> torch.Tensor:
-        jacobian = self.jacobian_w
+        jacobian = self.jacobian_w.clone()
 
-        if self._base_idx:
+        if self._base_idx is not None:
             base_quat_w = self._asset.data.body_quat_w[:, self._base_idx]
         else:
             base_quat_w = self._asset.data.root_quat_w
@@ -76,12 +76,21 @@ class DifferentialInverseKinematicsAction(__DifferentialInverseKinematicsAction)
     def _compute_frame_jacobian(self) -> torch.Tensor:
         jacobian = self.jacobian_b
         if self.cfg.body_offset is not None:
-            jacobian[:, :3, :] += torch.bmm(
-                math_utils.skew_symmetric_matrix(self._offset_pos), jacobian[:, 3:, :]
+            # Geometric Jacobian and pose errors are expressed in the base frame.
+            # v_TCP = v_link + omega x r; r must also be in that frame.
+            base_quat = (
+                self._asset.data.body_quat_w[:, self._base_idx]
+                if self._base_idx is not None else self._asset.data.root_quat_w
             )
-            jacobian[:, 3:, :] = torch.bmm(
-                math_utils.matrix_from_quat(self._offset_rot), jacobian[:, 3:, :]
+            link_quat = math_utils.quat_mul(
+                math_utils.quat_inv(base_quat),
+                self._asset.data.body_quat_w[:, self._body_idx],
             )
+            offset_b = math_utils.quat_apply(link_quat, self._offset_pos)
+            jacobian[:, :3, :] -= torch.bmm(
+                math_utils.skew_symmetric_matrix(offset_b), jacobian[:, 3:, :]
+            )
+            # A fixed tool rotation does not rotate angular velocity coordinates.
         return jacobian
 
 

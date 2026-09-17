@@ -2,6 +2,8 @@ from dataclasses import MISSING
 from typing import Sequence
 
 import torch
+from isaacsim.core.utils.stage import get_current_stage
+from pxr import Usd, UsdPhysics
 
 from srb import assets
 from srb._typing import StepReturn
@@ -27,6 +29,7 @@ from srb.core.sensor import ContactSensor, ContactSensorCfg
 from srb.core.sim import (
     CollisionPropertiesCfg,
     MassPropertiesCfg,
+    MeshCollisionPropertiesCfg,
     RigidBodyPropertiesCfg,
     UsdFileCfg,
 )
@@ -67,6 +70,9 @@ class SceneCfg(ManipulationSceneCfg):
         spawn=UsdFileCfg(
             usd_path=SRB_ASSETS_DIR_SPACE.joinpath("mep_combined.usd").as_posix(),
             collision_props=CollisionPropertiesCfg(),
+            mesh_collision_props=MeshCollisionPropertiesCfg(
+                mesh_approximation="convexHull"
+            ),
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),
         ),
@@ -81,6 +87,9 @@ class SceneCfg(ManipulationSceneCfg):
             usd_path=SRB_ASSETS_DIR_SPACE.joinpath("satellite.usd").as_posix(),
             scale=(1.5, 1.5, 1.5),
             collision_props=CollisionPropertiesCfg(),
+            mesh_collision_props=MeshCollisionPropertiesCfg(
+                mesh_approximation="convexHull"
+            ),
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),
         ),
@@ -142,11 +151,28 @@ class TaskCfg(ManipulationEnvCfg):
     episode_length_s: float = 10.0
     is_finite_horizon: bool = True
 
+    ## Physics
+    # The (scaled) scenery overlaps the base of large manipulators such as
+    # Canadarm3, which makes PhysX push the fixed base with ~1e16 N on the very
+    # first step -> joints spin out, drive targets exceed +-2pi and the sim explodes
+    filter_robot_scenery_collisions: bool = True
+    # The debris drifts away at ~0.2 m/s and triggers an episode reset (the arm
+    # snaps back to its initial pose) once it is 10 m from the end-effector
+    randomize_debris: bool = False
+
     def __post_init__(self):
         super().__post_init__()
 
+        from srb.utils.mep import configure_mep_manipulator
+
+        configure_mep_manipulator(self)
+
         # Keep the skydome (Earth) orientation fixed instead of randomizing it
         self.events.randomize_skydome_orientation = None
+
+        # Keep the debris static unless explicitly requested
+        if not self.randomize_debris:
+            self.events.randomize_obj_state = None  # type: ignore
 
         # Scene: Debris
         self.scene.debris = select_debris(
@@ -166,6 +192,14 @@ class TaskCfg(ManipulationEnvCfg):
         self._update_procedural_assets()
 
 
+def _env_prim_path(prim_path: str, i: int) -> str:
+    # NOTE: `resolve_env_prim_path` cannot be used for resolved scene paths because its
+    #       greedy "env_.*" pattern also swallows the rest of the path
+    return prim_path.replace("{ENV_REGEX_NS}", f"/World/envs/env_{i}").replace(
+        "/World/envs/env_.*", f"/World/envs/env_{i}"
+    )
+
+
 ############
 ### Task ###
 ############
@@ -179,6 +213,31 @@ class Task(ManipulationEnv):
 
         ## Get scene assets
         self._obj: RigidObject = self.scene["debris"]
+
+    def _setup_scene(self):
+        super()._setup_scene()
+
+        if self.cfg.filter_robot_scenery_collisions:
+            self._filter_robot_scenery_collisions()
+
+    def _filter_robot_scenery_collisions(self):
+        scenery_cfg = getattr(self.cfg.scene, "scenery", None)
+        robot_cfg = getattr(self.cfg.scene, "robot", None)
+        if scenery_cfg is None or robot_cfg is None:
+            return
+
+        stage = get_current_stage()
+        for i in range(self.num_envs):
+            robot_prim = stage.GetPrimAtPath(_env_prim_path(robot_cfg.prim_path, i))
+            scenery_prim = stage.GetPrimAtPath(_env_prim_path(scenery_cfg.prim_path, i))
+            if not robot_prim.IsValid() or not scenery_prim.IsValid():
+                continue
+            rel = UsdPhysics.FilteredPairsAPI.Apply(robot_prim).CreateFilteredPairsRel()
+            # The scenery keeps its articulation root, so filter it together with its colliders
+            rel.AddTarget(scenery_prim.GetPath())
+            for prim in Usd.PrimRange(scenery_prim):
+                if prim.HasAPI(UsdPhysics.CollisionAPI):  # type: ignore
+                    rel.AddTarget(prim.GetPath())
 
     def _reset_idx(self, env_ids: Sequence[int]):
         super()._reset_idx(env_ids)

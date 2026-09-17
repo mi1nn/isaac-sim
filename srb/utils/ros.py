@@ -5,9 +5,32 @@ from pathlib import Path
 from typing import Literal
 
 
+def prepare_ros2_process():
+    """Set native library paths before Kit starts (dlopen ignores late LD changes).
+
+    External ROS nodes still run with their own system Python. Isaac uses its
+    bundled Python-compatible bridge when no rclpy is already available.
+    """
+    import os
+    import sys
+
+    if find_spec("rclpy"):
+        return
+    distro = environ.get("ROS_DISTRO") or ("jazzy" if Path("/opt/ros/jazzy").exists() else "humble")
+    lib = _get_ros2_bridge_lib_path(distro).as_posix()
+    environ["ROS_DISTRO"] = distro
+    environ.setdefault("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
+    paths = environ.get("LD_LIBRARY_PATH", "").split(":")
+    if lib not in paths:
+        environ["LD_LIBRARY_PATH"] = ":".join([lib, *filter(None, paths)])
+        # Re-exec once, before SimulationApp/GPU startup, preserving all CLI args.
+        # The CLI parser consumes sys.argv; orig_argv retains flags and subcommands.
+        os.execve(sys.executable, [sys.executable, *sys.orig_argv[1:]], dict(environ))
+
+
 @cache
 def enable_ros2_bridge(
-    distro: str = "humble",
+    distro: str | None = None,
     rmw_implementation: Literal["rmw_fastrtps_cpp", "rmw_cyclonedds_cpp"]
     | str = "rmw_fastrtps_cpp",
 ) -> bool:
@@ -21,6 +44,8 @@ def enable_ros2_bridge(
         return True
 
     ## Update environment
+    distro = distro or environ.get("ROS_DISTRO", "humble")
+    environ.setdefault("ROS_DISTRO", distro)
     _append_ld_library_path(_get_ros2_bridge_lib_path(distro))
     if not environ.get("RMW_IMPLEMENTATION"):
         environ["RMW_IMPLEMENTATION"] = rmw_implementation

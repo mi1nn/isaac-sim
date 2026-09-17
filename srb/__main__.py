@@ -106,6 +106,11 @@ def run_agent_with_env(
     forwarded_args: Sequence[str] = (),
     **kwargs,
 ):
+    if agent_subcommand == "ros" or "ros" in interface:
+        from srb.utils.ros import prepare_ros2_process
+
+        prepare_ros2_process()
+
     from srb.core.app import AppLauncher
 
     # Preprocess kwargs

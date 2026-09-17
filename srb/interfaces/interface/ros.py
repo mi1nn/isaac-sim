@@ -6,6 +6,7 @@ except ImportError:
     enable_ros2_bridge()
 
 import threading
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Dict, List, Sequence, Tuple, Type
 
@@ -34,8 +35,26 @@ from std_msgs.msg import (
     MultiArrayLayout,
 )
 from std_srvs.srv import Empty as EmptySrv
-from tf2_ros import TransformBroadcaster
-from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+try:
+    from tf2_ros import TransformBroadcaster
+    from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+except ImportError:
+    # The internal ROS 2 libraries bundled with the Isaac Sim bridge ship `tf2_msgs`
+    # but not `tf2_ros`, so provide minimal drop-in broadcasters
+    from tf2_msgs.msg import TFMessage
+
+    class TransformBroadcaster:
+        def __init__(self, node: "Node", qos: "QoSProfile | int" = 100):
+            self._pub = node.create_publisher(TFMessage, "/tf", qos)
+
+        def sendTransform(self, transform: "TransformStamped | List[TransformStamped]"):
+            if not isinstance(transform, list):
+                transform = [transform]
+            self._pub.publish(TFMessage(transforms=transform))
+
+    class StaticTransformBroadcaster(TransformBroadcaster):
+        def __init__(self, node: "Node", qos: "QoSProfile | int" = 1):
+            self._pub = node.create_publisher(TFMessage, "/tf_static", qos)
 
 from srb.core.action import (
     ActionGroup,
@@ -54,7 +73,7 @@ from srb.core.asset import Articulation, RigidObject, RigidObjectCollection
 from srb.core.manager import SimulationManager
 from srb.core.sensor import Camera, Imu, RayCaster, RayCasterCamera
 from srb.utils.camera import create_pointcloud_from_depth, create_pointcloud_from_rgbd
-from srb.utils.math import subtract_frame_transforms
+from srb.utils.math import combine_frame_transforms, quat_mul, subtract_frame_transforms
 
 from .base import InterfaceBase
 
@@ -191,6 +210,12 @@ class RosInterface(InterfaceBase):
 
     @property
     def action(self) -> torch.Tensor:
+        # Relative IK commands latch in ROS. Stop motion if the project controller
+        # disappears; do not release a closed gripper on communication loss.
+        if getattr(self._env.cfg, "mep_ros_frames", False):
+            for start, end, received in getattr(self, "_ik_command_times", {}).values():
+                if time.monotonic() - received > 0.5:
+                    self._actions[:, start:end] = 0.0
         return self._actions
 
     def update(
@@ -239,10 +264,10 @@ class RosInterface(InterfaceBase):
 
         ## Publish per-env messages from the input
         for i in range(self._num_envs):
-            self._pub_reward[i].publish(Float32(data=reward[i].item()))
+            self._pub_reward[i].publish(Float32(data=float(reward[i].item())))
             for reward_term, pubs in self._pub_reward_term.items():
                 pubs[i].publish(
-                    Float32(data=info["reward_terms"][reward_term][i].item())
+                    Float32(data=float(info["reward_terms"][reward_term][i].item()))
                 )
             self._pub_terminated[i].publish(BoolMsg(data=terminated[i].item()))
             self._pub_truncated[i].publish(BoolMsg(data=truncated[i].item()))
@@ -297,6 +322,7 @@ class RosInterface(InterfaceBase):
     ## Action ##
 
     def setup_action_sub(self):
+        self._ik_command_times = {}
         ## Action terms
         self._sub_action_term_all: Dict[str, Subscription] = {}
         self._sub_action_term: Dict[str, Sequence[Subscription]] = {}
@@ -402,10 +428,13 @@ class RosInterface(InterfaceBase):
     ) -> Callable:
         start_idx = offset
         end_idx = offset + dim
+        is_ik = "differential_inverse_kinematics" in key
 
         if env_id is not None:
 
             def _proto_cb(self, msg: Any):
+                if is_ik:
+                    self._ik_command_times[(key, env_id)] = (start_idx, end_idx, time.monotonic())
                 self._actions[env_id, start_idx:end_idx] = torch.tensor(
                     extractor(msg), dtype=torch.float32, device=self._env.device
                 )
@@ -413,6 +442,8 @@ class RosInterface(InterfaceBase):
         else:
 
             def _proto_cb(self, msg: Any):
+                if is_ik:
+                    self._ik_command_times[(key, env_id)] = (start_idx, end_idx, time.monotonic())
                 self._actions[:, start_idx:end_idx] = torch.tensor(
                     extractor(msg), dtype=torch.float32, device=self._env.device
                 )
@@ -895,6 +926,23 @@ class RosInterface(InterfaceBase):
             if isinstance(asset, (Camera, RayCasterCamera)):
                 root_pos = asset.data.pos_w - self._env.scene.env_origins
                 root_quat = asset.data.quat_w_ros
+                if asset_name == "cam_wrist" and getattr(self._env.cfg, "mep_ros_frames", False):
+                    # With Fabric, USD world poses may be stale. The camera is
+                    # rigidly mounted on link7; use the actual PhysX link pose.
+                    robot = self._env.scene["robot"]
+                    link = robot.find_bodies("canadarm3_large_7")[0][0]
+                    offset = asset.cfg.offset
+                    if offset.convention != "opengl":
+                        raise ValueError("MEP wrist camera must use OpenGL mount convention")
+                    pos = torch.tensor(offset.pos, device=self._env.device).repeat(self._num_envs, 1)
+                    quat = torch.tensor(offset.rot, device=self._env.device).repeat(self._num_envs, 1)
+                    # OpenGL (-Z forward, +Y up) -> ROS optical (+Z forward, +Y down).
+                    gl_to_ros = torch.tensor([0., 1., 0., 0.], device=self._env.device).repeat(self._num_envs, 1)
+                    root_pos, root_quat = combine_frame_transforms(
+                        robot.data.body_pos_w[:, link], robot.data.body_quat_w[:, link],
+                        pos, quat_mul(quat, gl_to_ros),
+                    )
+                    root_pos = root_pos - self._env.scene.env_origins
             elif isinstance(asset, (RayCaster, Imu)):
                 root_pos = asset.data.pos_w - self._env.scene.env_origins
                 root_quat = asset.data.quat_w
@@ -998,6 +1046,19 @@ class RosInterface(InterfaceBase):
                     ) in asset.root_physx_view.shared_metatype.link_indices.items()
                 ]
             )
+        if getattr(self._env.cfg, "mep_ros_frames", False):
+            # Phase-1 contract aliases refer to env0. ROS quaternions use x,y,z,w.
+            transforms.append(TransformStamped(
+                header=Header(stamp=time_msg, frame_id="srb/env0/robot/canadarm3_large_0"),
+                child_frame_id="mrv/base_link",
+                transform=Transform(rotation=Quaternion(w=1.0)),
+            ))
+            from srb.assets.object.tool.scaled_kinova import KINOVA_TCP_DISTANCE
+            transforms.append(TransformStamped(
+                header=Header(stamp=time_msg, frame_id="srb/env0/end_effector"),
+                child_frame_id="mrv/tcp",
+                transform=Transform(translation=Vector3(z=-KINOVA_TCP_DISTANCE), rotation=Quaternion(w=1.0)),
+            ))
         self._tf_broadcaster.sendTransform(transforms)
 
     def _broadcast_transforms_static(self):
