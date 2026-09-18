@@ -1,9 +1,9 @@
 try:
     import rclpy
 except ImportError:
-    from srb.utils.ros import enable_ros2_bridge
+    from srb.utils.ros import require_ros2_bridge
 
-    enable_ros2_bridge()
+    require_ros2_bridge()
 
 import threading
 from collections.abc import Callable
@@ -34,8 +34,12 @@ from std_msgs.msg import (
     MultiArrayLayout,
 )
 from std_srvs.srv import Empty as EmptySrv
-from tf2_ros import TransformBroadcaster
-from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+from srb.utils.ros import get_transform_broadcasters
+
+# `tf2_ros` cannot be imported directly: Isaac Sim's bundled ROS 2 stack ships
+# `tf2_msgs` but not `tf2_ros`, which needs the compiled `tf2_py`. This returns the
+# real classes when a full ROS 2 is sourced and publish-only equivalents otherwise.
+TransformBroadcaster, StaticTransformBroadcaster = get_transform_broadcasters()
 
 from srb.core.action import (
     ActionGroup,
@@ -239,13 +243,16 @@ class RosInterface(InterfaceBase):
 
         ## Publish per-env messages from the input
         for i in range(self._num_envs):
-            self._pub_reward[i].publish(Float32(data=reward[i].item()))
+            # The generated message conversions assert the exact Python type in C, so
+            # an integer reward term aborts the whole process instead of raising.
+            # Casting here keeps a task's tensor dtype from being able to kill the sim.
+            self._pub_reward[i].publish(Float32(data=float(reward[i].item())))
             for reward_term, pubs in self._pub_reward_term.items():
                 pubs[i].publish(
-                    Float32(data=info["reward_terms"][reward_term][i].item())
+                    Float32(data=float(info["reward_terms"][reward_term][i].item()))
                 )
-            self._pub_terminated[i].publish(BoolMsg(data=terminated[i].item()))
-            self._pub_truncated[i].publish(BoolMsg(data=truncated[i].item()))
+            self._pub_terminated[i].publish(BoolMsg(data=bool(terminated[i].item())))
+            self._pub_truncated[i].publish(BoolMsg(data=bool(truncated[i].item())))
 
         ## Publish actions
         if action is not None and hasattr(self, "_pub_action"):

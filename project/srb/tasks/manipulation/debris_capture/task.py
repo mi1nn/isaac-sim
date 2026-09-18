@@ -79,7 +79,7 @@ class SceneCfg(ManipulationSceneCfg):
                 mesh_approximation="convexHull"
             ),
             rigid_props=RigidBodyPropertiesCfg(),
-            mass_props=MassPropertiesCfg(density=1000.0),
+            mass_props=MassPropertiesCfg(density=3000.0),
         ),
         ## NOTE: Pose taken from the reference stage `no_gripper.usd`.
         init_state=RigidObjectCfg.InitialStateCfg(
@@ -422,8 +422,12 @@ def _compute_step_return(
     contact_force_matrix_end_effector: torch.Tensor | None,
 ) -> StepReturn:
     num_envs = episode_length.size(0)
-    dtype = episode_length.dtype
     device = episode_length.device
+    # NOT episode_length.dtype: the episode counter is an integer tensor, and every
+    # tensor built with `dtype` here is a reward or an observation, i.e. a float. An
+    # integer `reward_grasp` reaches the ROS interface as a Python int and aborts the
+    # process inside the std_msgs/Float32 C conversion ("Assertion `PyFloat_Check'").
+    dtype = vel_ang_obj.dtype
 
     ############
     ## States ##

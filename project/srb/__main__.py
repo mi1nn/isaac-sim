@@ -261,9 +261,9 @@ def run_agent_with_env(
                 WrapperObsType,
             )
 
-            from srb.utils.ros import enable_ros2_bridge
+            from srb.utils.ros import require_ros2_bridge
 
-            enable_ros2_bridge()
+            require_ros2_bridge()
 
             import rclpy
             from rclpy.executors import MultiThreadedExecutor
