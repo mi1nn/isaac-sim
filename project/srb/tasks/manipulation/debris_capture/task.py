@@ -214,7 +214,16 @@ class TaskCfg(ManipulationEnvCfg):
                     mesh_approximation="convexDecomposition"
                 ),
                 rigid_props=RigidBodyPropertiesCfg(),
-                mass_props=MassPropertiesCfg(density=1000.0),
+                ## NOTE: `mass` (not `density`) is used deliberately. UsdPhysics.MassAPI
+                ## gives an authored `physics:mass` precedence over `physics:density`, so
+                ## this pins the MEP's total mass to a fixed value regardless of its
+                ## collision volume. With `density=1000.0` the convexDecomposition
+                ## collision volume put the real mass at ~143,183 kg (measured via
+                ## `root_physx_view.get_masses()`), which the Canadarm3's actuators
+                ## (`effort_limit_sim=2500`, `stiffness=40000`) cannot move at a useful
+                ## rate. 1000 kg is a manual-control testing value, not a physically
+                ## accurate MEP mass -- revert to `density=1000.0` to restore it.
+                mass_props=MassPropertiesCfg(mass=3000.0),
                 activate_contact_sensors=True,
             ),
             ## NOTE: Pose taken from the reference stage `no_gripper.usd`, where the

@@ -45,8 +45,9 @@ class CaptureCfg:
     # None selects the robot's flange link (`canadarm3_large_7` for the Canadarm3)
     robot_link: str | None = None
     # Size of the capture cylinder. It represents the capture region, so it may be
-    # (and by default is) much larger than the MEP marker cylinder.
-    radius: float = 0.3  # CAPTURE_RADIUS [m]
+    # (and by default is) much larger than the MEP marker cylinder. Kept equal to
+    # `distance_threshold` so the visual region matches the actual capture radius.
+    radius: float = 0.6  # CAPTURE_RADIUS [m]
     ## NOTE: Kept short enough that the Canadarm3 wrist camera (0.9 m below the
     ## link origin, i.e. 0.46 m past the flange) stays outside the cylinder.
     length: float = 0.4  # CAPTURE_LENGTH [m]
@@ -60,7 +61,10 @@ class CaptureCfg:
     marker_relpath: str = "gripper_fixture/Cylinder_01"
 
     ## Detection
-    distance_threshold: float = 0.3  # CAPTURE_DISTANCE_THRESHOLD [m]
+    ## NOTE: Doubled from the original 0.3 m so the arm no longer has to line up
+    ## exactly on the MEP marker centre -- getting close to it is enough. Kept well
+    ## under `approach_distance` so a distant arm still cannot capture by accident.
+    distance_threshold: float = 0.6  # CAPTURE_DISTANCE_THRESHOLD [m]
     approach_distance: float = 2.0  # IDLE -> APPROACH below this distance [m]
     # After a release, the MEP must first get this multiple of the threshold away
     # before it can be captured again (otherwise it would be re-captured instantly)

@@ -1150,3 +1150,118 @@ python3 docs/debris_capture_tests/ctrlz_repro.py {fg|rerun|killjob|exit} <log>
 2. MEP 질량을 실제 값에 맞게 조정할지 결정 (`task.py` debris `mass_props`)
 3. 필요 시 orientation 조건 (capture 축과 marker 축의 각도) 추가
 4. 관절 단위 조작 대신 capture 지점 기준 Cartesian 조작 (기존 IK action 활용) 검토
+
+---
+---
+
+# Part 3 — MEP 질량 축소 + Capture 범위 확대
+
+- 작성: 2026-09-18 / 브랜치 `feature/magnet`
+- 전제: Part 2 의 capture/attachment 방식(중심점 거리 기반 판정, 런타임 FixedJoint 결합)은
+  **그대로 유지**. 이번 변경은 (1) MEP 질량, (2) capture 판정 거리 및 cylinder 크기, 이 두 파라미터만 수정.
+- 실행 머신: Isaac Sim 설치 머신(`/home/rokey`), 이전과 동일 버전.
+
+## 수정한 파일
+
+| 파일 | 변경 내용 |
+|---|---|
+| `project/srb/tasks/manipulation/debris_capture/task.py` | MEP(`debris`) spawn 의 `mass_props` 를 `MassPropertiesCfg(density=1000.0)` → `MassPropertiesCfg(mass=1000.0)` 로 변경. (satellite 쪽 `mass_props` 는 MEP 가 아니므로 손대지 않음) |
+| `project/srb/tasks/manipulation/debris_capture/capture.py` | `CaptureCfg.distance_threshold` `0.3` → `0.6` m, `CaptureCfg.radius` `0.3` → `0.6` m (`length` 은 wrist camera 간섭 제약으로 유지, `approach_distance`/`rearm_factor` 등 나머지 detection/attachment 로직은 변경 없음) |
+| `docs/debris_capture_tests/capture_test.py` | 질량 확인, "1.0 m 이격 시 미capture", "capture 시 거리값이 옛 threshold(0.3 m) 보다 큼" 검증 3건 추가 |
+
+## 1. MEP 질량
+
+- **원인**: 기존에는 `density=1000.0` 을 사용했는데, `UsdPhysics.MassAPI` 는 `physics:mass` 가 authored
+  되어 있지 않으면 collision 근사 형상(volume) × density 로 질량을 역산합니다. MEP 는 52개 mesh 의
+  convexDecomposition collision 을 갖고 있어 부피가 커서 실제 질량이 **143,183 kg** 이었습니다
+  (Part 2 Step 5 에서 실측, 이번에도 재확인).
+- **수정**: `mass_props=MassPropertiesCfg(mass=1000.0)`. `physics:mass` 가 authored 되면 density 기반
+  계산보다 **우선** 적용됩니다 (`isaaclab/sim/schemas/schemas.py::modify_mass_properties` 문서 및 USD
+  Physics 표준 거동). collision/mesh_collision_props/rigid_props 등 나머지 physics 구조는 그대로 두었습니다.
+- **실제 적용된 값 (실측)**: `mep.root_physx_view.get_masses().sum()` = **999.9999... kg (≈ 1000 kg)**.
+- 이 값은 실제 MEP 의 물리적으로 정확한 질량이 아니라 **수동 제어 테스트용 값**입니다. 원래 무게로
+  되돌리려면 `mass=1000.0` → `density=1000.0` 으로 되돌리면 됩니다 (코드에 주석으로 남겨둠).
+
+## 2. Capture 범위 확대
+
+- 기존 방식(두 capture 지점 사이의 유클리드 거리만 비교하고, threshold 이하면 capture)은 그대로 두고
+  **값만** 조정했습니다.
+
+  | 파라미터 | 이전 | 이후 |
+  |---|---|---|
+  | `CAPTURE_DISTANCE_THRESHOLD` (`distance_threshold`) | 0.30 m | **0.60 m** |
+  | `CAPTURE_RADIUS` (capture cylinder 반지름, 시각 표시 전용) | 0.30 m | **0.60 m** |
+  | `CAPTURE_LENGTH` | 0.40 m | 0.40 m (변경 없음 — wrist camera 간섭 제약) |
+  | `approach_distance` (IDLE→APPROACH 전환 거리) | 2.0 m | 2.0 m (변경 없음) |
+  | `rearm_factor` | 1.5 | 1.5 (변경 없음, re-arm 거리 = 0.9 m) |
+
+- capture cylinder 반지름을 threshold 와 동일하게 키운 것은 Part 2 부터 있던 설계 관례(반지름이
+  실제 capture 가능 범위를 시각적으로 나타냄)를 그대로 따른 것입니다.
+- `approach_distance`(2.0 m)가 새 threshold(0.6 m)보다 충분히 커서, "너무 멀리서도 capture" 되는
+  문제는 생기지 않습니다 (아래 테스트에서 1.0 m 지점은 capture 되지 않음을 실측 확인).
+
+## 3. 테스트 결과 (실행 완료, headless)
+
+GUI 명령(`srb agent manual --env debris_capture_visual ...`)은 이번에도 **같은 머신에서 팀원이 Isaac Sim
+을 테스트 중이라 화면 혼동을 피하기 위해 실행하지 않았습니다.** 대신 Part 2 에서 만든 headless 검증
+스크립트 2종을 **이번 변경 이후 코드로 재실행**했습니다. 둘 다 `srb agent manual` 과 동일한 물리
+루프(`scene.write_data_to_sim → sim.step → scene.update → env.update_capture`)를 사용하며,
+`manual_test.py` 는 실제 `manual_agent()` 함수와 `R`/`L`/`G`/`UP`/`DOWN` 키 콜백을 그대로 호출합니다.
+
+```bash
+~/isaac-sim/python.sh docs/debris_capture_tests/capture_test.py   # 19/19 PASS
+~/isaac-sim/python.sh docs/debris_capture_tests/manual_test.py    # 5/5 PASS
+```
+
+### `capture_test.py` — 19/19 PASS (신규 3건 포함)
+
+| 확인 항목 | 결과 |
+|---|---|
+| **MEP 질량 ≈ 1000 kg** | 실측 999.9999 kg → PASS |
+| capture cylinder / MEP marker prim 존재 | PASS |
+| idle 2 s 정지 | 이동 2.38e-07 m |
+| capture 전 팔 이동 시 MEP 독립 | PASS |
+| **MEP 중심에서 1.0 m 떨어진 지점에서는 capture 안 됨** (범위 확대가 과도하지 않은지) | 거리 1.405 m, 상태 APPROACH(1) → PASS |
+| **capture 가 옛 threshold(0.3 m) 보다 먼 거리에서 발생** (범위가 실제로 넓어졌는지) | 거리 정확히 threshold 값인 0.600 m 에서 capture → PASS |
+| 접근 후 CAPTURED | 거리 0.600 m, **1109 step (시뮬 7.4 s)** 만에 도달 — Part 2 의 0.3 m threshold 때는 5111 step(34.1 s) 이었음. 범위가 넓어져 접근이 훨씬 빨리 성공함 |
+| capture 전 접촉으로 MEP 가 밀리지 않음 | 0.00 m |
+| FixedJoint 생성 / snap 없음 | PASS / 0.01 mm |
+| capture 후 팔 이동 → MEP 동반 이동 | 0.658 m, 0.013 m (가벼워진 MEP 라 관절 목표에 더 빨리 도달, Part 2 때보다 한쪽 스윕에서 더 크게 움직임) |
+| 상대 transform 유지 (marker 지점) | 0.00 mm / 0.069°, 0.02 mm / 0.056° — 질량이 가벼워졌는데도 유지 정확도는 Part 2(≤0.17 mm)와 동급 이상 |
+| release → joint 제거, 팔 1 m 후퇴 | MEP 는 탄도 궤적과 0.30 mm 차이 (따라오지 않음), release 후 MEP 이동량 0.042 m (Part 2: 0.150 m — 가벼워진 만큼 release 순간 잔류 속도도 작음) |
+| re-arm → 재 capture | PASS |
+| capture 상태에서 reset | joint 제거, IDLE, MEP/팔 초기 위치·속도 0 |
+
+### `manual_test.py` (실제 `manual_agent()` 루프, 키보드만 스크립트로 대체) — 5/5 PASS
+
+- `KEY_1` + `UP`×3 → joint 1 이 2.962° 이동 (변경 없음, 관절 제어 자체는 질량과 무관)
+- 접근 → 루프 안에서 `CAPTURED` (capture hook 정상)
+- capture 후 `N`, `KEY_1`, `DOWN`×5 (10 s) → **MEP 가 1.290 m 이동**
+  (Part 2, MEP 143 t 일 때 같은 조건: 0.110 m 이동 → **약 11.7배** 더 잘 따라옴.
+  "제어에 문제가 발생한다"던 원래 증상이 실측으로 개선됨을 확인)
+- `R` → release, `L` → reset 후 IDLE, `G` → capture 상태 표시
+
+### 확인한 항목 (요청 체크리스트)
+
+| 확인 요청 | 결과 |
+|---|---|
+| MEP 질량이 실제로 약 1000 kg 으로 적용되는지 | ✅ 실측 999.9999 kg |
+| Canadarm3 가 MEP 를 정상적으로 움직일 수 있는지 | ✅ 동일 키 입력으로 이동량이 0.110 m → 1.290 m 로 개선 |
+| 기존 capture 방식이 그대로 동작하는지 | ✅ 거리 기반 판정 · FixedJoint 결합 로직 무변경, 전체 흐름(IDLE→APPROACH→CAPTURED→release→re-arm→reset) 모두 통과 |
+| 기존보다 넓어진 범위에서 안정적으로 capture 되는지 | ✅ 0.600 m 에서 capture (옛 threshold 0.3 m 보다 멀리서 성공) |
+| capture 후 MEP 의 상대 위치와 orientation 이 정상적으로 유지되는지 | ✅ 위치 오차 ≤0.02 mm, 각도 오차 ≤0.069°(정지 상태 기준) |
+| 너무 먼 거리에서 잘못 capture 되지 않는지 | ✅ 1.0 m 지점에서는 APPROACH 상태 유지, capture 안 됨 |
+
+### 미실행
+
+- **GUI 에서 사람이 직접 키보드로 조작하는 테스트** (팀원 세션과 화면 공유 중이라 창을 띄우지 않음).
+  다음에 GUI 로 실행할 때 `1`~`7`/`↑↓` 로 MEP 중심 근처까지만 접근해도 `[CAPTURE] State: CAPTURED` 가
+  뜨는지, 화면상 capture cylinder 가 이전보다 크게 보이는지 확인 필요.
+- 여러 방향에서의 접근(현재 테스트는 IK 로 정면/측면 각 1방향만 검증)
+
+### 참고 — 수치가 정확히 0.600 m 인 이유
+
+`capture_test.py` 의 IK 접근은 매 step 최대 0.02 m 씩 목표를 향해 이동하고, `CaptureManager.update()`
+가 매 step 마다 `distance ≤ distance_threshold` 를 검사합니다. 따라서 threshold 를 막 넘는 그 step 에서
+바로 capture 되어, 로그상 거리값이 threshold 와 거의 같게(0.600 m) 찍힌 것이며 threshold 가 6배가 아니라
+2배(0.3→0.6 m)로 넓어졌다는 것과 모순되지 않습니다.

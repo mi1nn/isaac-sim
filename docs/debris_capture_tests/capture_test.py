@@ -61,7 +61,11 @@ def main(env_cfg, agent_cfg=None):
     print("[INFO] marker xform:", [(a.GetName(), a.Get()) for a in marker.GetAttributes() if a.GetName().startswith("xformOp:")])
     print("[INFO] DiscMount active:", stage.GetPrimAtPath("/World/envs/env_0/debris/gripper_fixture/DiscMount").IsActive())
     print("[INFO] gravity:", sim.cfg.gravity)
-    print("[INFO] MEP mass [kg]:", mep.root_physx_view.get_masses().sum().item())
+    mep_mass = mep.root_physx_view.get_masses().sum().item()
+    print("[INFO] MEP mass [kg]:", mep_mass)
+    check("MEP mass set to ~1000 kg (was ~143,183 kg with density=1000)",
+          abs(mep_mass - 1000.0) < 5.0, f"{mep_mass:.1f} kg")
+    print(f"[INFO] capture cylinder radius={cap.cfg.radius:.3f} m, distance_threshold={cap.cfg.distance_threshold:.3f} m")
     print("[INFO] MEP marker offset in body frame:", cap._capture_point_mep.tolist())
     print("[INFO] robot capture point in link frame:", cap._capture_point_link.tolist())
 
@@ -142,10 +146,34 @@ def main(env_cfg, agent_cfg=None):
                 return (i + 1) * 30
         return max_steps
 
-    ## 3) Approach the marker with position-only DLS IK on the capture point
+    ## 3a) Approach to a point clearly outside the (widened) capture range and hold:
+    ## must NOT capture, so a distant arm cannot trigger it by accident.
+    mep_center = cap.mep_capture_pos_w[0].clone()
+    to_center = mep_center - cap.robot_capture_pos_w[0]
+    world_up = torch.tensor([0.0, 0.0, 1.0], device=to_center.device)
+    perp = torch.linalg.cross(to_center, world_up)
+    if torch.norm(perp) < 1e-3:
+        perp = torch.linalg.cross(to_center, torch.tensor([0.0, 1.0, 0.0], device=to_center.device))
+    perp = perp / torch.norm(perp)
+    far_goal = mep_center + perp * 1.0  # 1.0 m off-centre, still < approach_distance (2.0 m)
+    n = 0
+    while n < 4000 and ik_step(far_goal) > 0.03:
+        n += 1
+    target[:] = robot.data.joint_pos.clone()
+    settle()
+    d_far = cap.distance.item()
+    check("no capture 1.0 m off MEP centre (widened range must not over-capture)",
+          cap.state.item() != 2 and d_far > cap.cfg.distance_threshold,
+          f"distance {d_far:.3f} m, state {cap.state.item()} (0=IDLE, 1=APPROACH, 2=CAPTURED)")
+
+    ## 3b) Approach the marker with position-only DLS IK on the capture point
     it, wall, pre = approach()
+    d_at_capture = cap.distance.item()
     check("CAPTURED reached by approaching the marker", cap.state.item() == 2,
-          f"after {it} steps ({it*dt:.1f} s sim, {wall:.1f} s wall), distance {cap.distance.item():.3f} m")
+          f"after {it} steps ({it*dt:.1f} s sim, {wall:.1f} s wall), distance {d_at_capture:.3f} m")
+    check("capture triggers over the widened range (captured farther than the old 0.3 m threshold)",
+          0.35 < d_at_capture <= cap.cfg.distance_threshold + 0.02,
+          f"captured at {d_at_capture:.3f} m (threshold {cap.cfg.distance_threshold:.3f} m)")
     check("MEP not pushed before capture (no contact)", pre < 1e-3, f"MEP moved {pre:.2e} m during approach")
     check("capture FixedJoint prim exists", stage.GetPrimAtPath("/World/envs/env_0/capture_joint").IsValid())
 
