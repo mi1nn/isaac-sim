@@ -81,10 +81,24 @@ class SceneCfg(ManipulationSceneCfg):
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=3000.0),
         ),
-        ## NOTE: Pose taken from the reference stage `no_gripper.usd`.
+        ## NOTE: Placed for the peg-in-hole insertion, not as background scenery.
+        ## The satellite's only thruster (`GOES_R/Thruster`) is a nozzle whose mouth
+        ## is the hole: it sits at (-0.05, -2.721, -0.01) in the asset frame -- the
+        ## most -Y point of the whole satellite, so nothing occludes it -- opens
+        ## along the asset's -Y axis and has a 0.166 m radius (0.332 m at scale 2.0).
+        ## The identity rotation therefore aims the nozzle along world -Y, straight
+        ## back at the MEP's peg, and the position puts the nozzle mouth on the peg
+        ## axis, `INSERTION_GAP` = 1.5 m ahead of the peg tip:
+        ##     nozzle mouth world = (-0.696816, 16.087368, 4.588791)
+        ##     peg tip world      = (-0.696816, 14.587368, 4.588791)
+        ## The two are collinear along world +Y, so the arm inserts by translating
+        ## the MEP +Y. The previous pose (-14.13, 33.36, 11.49) with rot (0.707107,
+        ## 0.707107, 0, 0) parked the satellite ~25 m off to the side with the
+        ## nozzle pointing straight down; neither the distance nor the direction
+        ## allowed an insertion.
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(-14.133586, 33.362941, 11.4938),
-            rot=(0.707107, 0.707107, 0.0, 0.0),
+            pos=(-0.596816, 21.529368, 4.608791),
+            rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
 
@@ -188,6 +202,65 @@ class TaskCfg(ManipulationEnvCfg):
     )
     debris_inactive_relpaths: Tuple[str, ...] = ("gripper_fixture/DiscMount",)
 
+    ## Exact (SDF) collision for the parts of the satellite that form the hole.
+    ## NOTE: The satellite as a whole is approximated with one convex hull per mesh
+    ## (see `SceneCfg.satellite`), which is fine for scenery but fills in every
+    ## cavity -- and the thruster nozzle IS a cavity. Measured on the spawned hulls,
+    ## the peg is stopped dead at the nozzle mouth (asset y=-2.72) by the hull of
+    ## `Thruster`, and again at y=-2.16 by the hull of the `ThrustRim` ring. Both are
+    ## thin-walled shells whose hull is a solid cone / a solid disc, so no amount of
+    ## repositioning gets the peg in; the collision approximation itself has to go.
+    ## `sdf` keeps the exact concave surface on a *dynamic* body, which is what
+    ## peg-in-hole needs. It is re-applied to these two prims only, after the spawn,
+    ## so the other 22 satellite meshes keep their cheap hulls.
+    ## The satellite bus (`GOES_R/Mesh_1222`) is deliberately NOT in this list: its
+    ## hull closes off the bore at y=-2.32 while the real surface is at y=-2.24, an
+    ## error of 0.16 m in world units, and it is a genuinely solid body behind the
+    ## nozzle throat. Insertion depth is ~0.8 m either way.
+    ## Set to an empty tuple to fall back to the plain convex hulls.
+    ## IMPORTANT: PhysX evaluates SDF collision on the GPU only -- run with
+    ## `env.sim.device=cuda`, since `BaseEnvCfg.sim.device` still defaults to "cpu".
+    satellite_sdf_relpaths: Tuple[str, ...] = ("GOES_R/Thruster", "GOES_R/ThrustRim")
+    satellite_sdf_resolution: int = 256
+
+    ## MEP-mounted camera, repositioned to watch the peg-in-hole insertion.
+    ## The asset parks this camera off to the side of the telescope, where it sees
+    ## nothing useful. Moved beside the peg (`debris_peg_relpath`) and aimed along the
+    ## peg's insertion axis, it frames the peg tip and the space ahead of it, which is
+    ## where the hole appears as the MEP is manoeuvred in.
+    ## Values are LOCAL to the camera prim's parent (the telescope Xform), not the
+    ## debris body frame: that parent is a pure 0.3 scale plus a translation of
+    ## (-1.643962, 5.685116, -0.050003), so a pose measured against the body has to
+    ## be pushed through its inverse first. Rotation is XYZ Euler degrees because
+    ## that is the op the camera prim already carries (the marker above uses a
+    ## quaternion instead).
+    ## Set to None to keep the camera where the asset put it.
+    debris_camera_relpath: str = (
+        "Fermi_Gamma_ray_Large_Area_Space_Telescope/Camera"
+    )
+    ## NOTE: The peg is the bare tapered end of the Ares1 rocket body, not anything
+    ## on the telescope: in the asset frame it runs along -Y from a 0.03 m-radius tip
+    ## at (-1.6457, -2.2142, 0.0965) back to ~0.154 m radius 5 m later, and it is the
+    ## only part of the MEP slender enough to enter the 0.166 m thruster nozzle.
+    ## (The old value pointed at a telescope radiator panel, which is neither
+    ## slender nor at the free end of the assembly.)
+    debris_peg_relpath: str = "Xform_Ares1/imagetostl_mesh12"
+    debris_camera_xform: (
+        Tuple[Tuple[float, float, float], Tuple[float, float, float]] | None
+    ) = (
+        # Resolves to (-0.8957, 0.9858, 0.0965) in the debris body frame: 3.2 m behind
+        # the peg tip along the insertion axis (-Y) and 0.75 m off the peg axis towards
+        # +X, which the MEP's orientation maps to world +Z, so the camera looks slightly
+        # down on the peg. 0.75 m clears the peg (0.13 m radius there) comfortably, and
+        # nothing else of the MEP sits between the camera and the tip.
+        (2.494207, -15.664387, 0.488343),
+        # Aims at the midpoint between the peg tip and the hole, with the image up axis
+        # on world +Z. Measured against this pose the tip lands at -2.3 deg, the nozzle
+        # mouth at +1.6 deg and a point 2 m past it at +4.4 deg, all centred
+        # horizontally, well inside the camera's 39.8 x 22.9 deg frame.
+        (0.0, -90.0, -100.935287),
+    )
+
     def __post_init__(self):
         super().__post_init__()
 
@@ -226,12 +299,27 @@ class TaskCfg(ManipulationEnvCfg):
                 mass_props=MassPropertiesCfg(mass=3000.0),
                 activate_contact_sensors=True,
             ),
-            ## NOTE: Pose taken from the reference stage `no_gripper.usd`, where the
-            ## MEP was moved into the reach of the Canadarm3 (the previous pose was
-            ## ~14.8 m from the flange, beyond the arm's ~8.5 m reach).
+            ## NOTE: The MEP is one long column along its own -Y axis: the Ares1
+            ## rocket body tapers into a bare peg (`debris_peg_relpath`) whose tip
+            ## is at (-1.6457, -2.2142, 0.0965) in the asset frame, the free end of
+            ## the whole assembly. That peg is what goes into the satellite's
+            ## thruster nozzle, so the column has to be level for the insertion to
+            ## be a straight horizontal push.
+            ##
+            ## `rot` is the pure axis swap  local X -> world +Z,  local Y -> world -Y,
+            ## local Z -> world +X, i.e. the peg points along world +Y, dead level.
+            ## It is the previous orientation with its 15.5 deg tilt removed (the
+            ## old quat sent the column up at 15.5 deg above horizontal, which is
+            ## what made the peg and the nozzle impossible to line up).
+            ##
+            ## `pos` is chosen so the capture marker (`capture.marker_relpath`,
+            ## asset frame (-1.5689, 7.0549, -0.079)) stays at exactly the world
+            ## point it occupied before, (-0.889866, 4.391358, 4.673271) -- the
+            ## reach of the Canadarm3 is unchanged by the re-levelling. The peg tip
+            ## then lands at (-0.696816, 14.587368, 4.588791).
             init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(-0.802966, 11.409131, 8.408625),
-                rot=(0.095277, -0.700659, 0.095277, -0.700659),
+                pos=(-0.802966, 12.151748, 6.399061),
+                rot=(0.0, 0.707107, 0.0, 0.707107),
                 lin_vel=(0.0, 0.0, 0.0),
                 ang_vel=(0.0, 0.0, 0.0),
             ),
@@ -302,8 +390,14 @@ class Task(ManipulationEnv):
                     Gf.Quatd(orient[0], *orient[1:])
                 )
                 marker.GetAttribute("xformOp:scale").Set(Gf.Vec3d(*scale))
+            if self.cfg.debris_camera_xform is not None:
+                self._place_debris_camera(stage, debris_prim_path)
             for relpath in self.cfg.debris_inactive_relpaths:
                 stage.GetPrimAtPath(f"{debris_prim_path}/{relpath}").SetActive(False)
+
+        ## Exact collision for the thruster nozzle (see `TaskCfg.satellite_sdf_relpaths`)
+        if self.cfg.satellite_sdf_relpaths:
+            self._apply_satellite_sdf_collision(stage)
 
         ## Capture cylinder on the flange link (replaces the gripper)
         if self._capture_enabled:
@@ -314,6 +408,63 @@ class Task(ManipulationEnv):
                 f"{self.scene['robot'].cfg.prim_path}/{self.cfg.capture.robot_link}",
                 self._capture_flange_offset,
             )
+
+    def _apply_satellite_sdf_collision(self, stage):
+        """Swap the convex hulls of the nozzle parts for exact SDF collision."""
+        sdf_cfg = MeshCollisionPropertiesCfg(
+            mesh_approximation="sdf",
+            sdf_resolution=self.cfg.satellite_sdf_resolution,
+        )
+        satellite_name = self.cfg.scene.satellite.prim_path.rsplit("/", 1)[-1]
+        for env_prim_path in self.scene.env_prim_paths:
+            for relpath in self.cfg.satellite_sdf_relpaths:
+                prim_path = f"{env_prim_path}/{satellite_name}/{relpath}"
+                if not stage.GetPrimAtPath(prim_path).IsValid():
+                    raise ValueError(f"Satellite SDF prim not found: {prim_path}")
+                # Walks the subtree and rewrites the approximation on every mesh
+                sdf_cfg.func(prim_path, sdf_cfg)
+        print(
+            "[capture] SDF collision applied to "
+            f"{', '.join(self.cfg.satellite_sdf_relpaths)} "
+            f"(resolution {self.cfg.satellite_sdf_resolution})",
+            flush=True,
+        )
+        # PhysX only evaluates SDF contacts on the GPU. On CPU the nozzle silently
+        # keeps behaving like its convex hull, i.e. exactly the bug this works
+        # around, so say so instead of letting the insertion fail mysteriously.
+        if not str(self.cfg.sim.device).startswith("cuda"):
+            print(
+                f"[capture] WARNING: sim.device is '{self.cfg.sim.device}'. PhysX "
+                "evaluates SDF collision on the GPU only -- the thruster nozzle "
+                "will still collide as a solid convex hull and the peg will not "
+                "enter. Re-run with `env.sim.device=cuda`.",
+                flush=True,
+            )
+
+    def _place_debris_camera(self, stage, debris_prim_path: str):
+        """Move the MEP's own camera beside the peg (see `TaskCfg.debris_camera_xform`)."""
+        camera_path = f"{debris_prim_path}/{self.cfg.debris_camera_relpath}"
+        camera = stage.GetPrimAtPath(camera_path)
+        if not camera.IsValid():
+            raise ValueError(f"MEP camera prim not found: {camera_path}")
+
+        translate, rotate_xyz = self.cfg.debris_camera_xform
+        # The prim is authored with translate/rotateXYZ/scale, so write the rotation
+        # into the op it already has instead of adding a competing orient op.
+        camera.GetAttribute("xformOp:translate").Set(Gf.Vec3d(*translate))
+        rotate_attr = camera.GetAttribute("xformOp:rotateXYZ")
+        if not rotate_attr.IsValid():
+            raise ValueError(
+                f"{camera_path} has no xformOp:rotateXYZ; its xformOpOrder is "
+                f"{camera.GetAttribute('xformOpOrder').Get()}"
+            )
+        rotate_attr.Set(Gf.Vec3f(*rotate_xyz))
+        print(
+            f"[capture] MEP camera moved to {tuple(round(v, 4) for v in translate)} "
+            f"rotateXYZ={tuple(rotate_xyz)}, watching "
+            f"'{self.cfg.debris_peg_relpath.rsplit('/', 1)[-1]}'",
+            flush=True,
+        )
 
     def update_capture(self):
         """Evaluate the capture condition; call after every physics step."""

@@ -157,6 +157,21 @@ class CaptureManager:
             [self._marker_offset_in_body(path) for path in self._mep_prim_paths],
             device=device,
         )
+        # Face normals of the two capture surfaces, used only to report how square the
+        # attachment came out (see `_attach`). The marker is a puck whose axis is the
+        # MEP's own long axis, so a tilt here is a tilt of the peg -- which is why the
+        # vision servo aligns to it before docking.
+        self._marker_axis_mep = torch.tensor(
+            [self._marker_axis_in_body(path) for path in self._mep_prim_paths],
+            device=device,
+        )
+        self._capture_axis_link = torch.tensor(
+            [quat_apply(
+                torch.tensor([capture_cylinder_pose(cfg, flange_offset)[1]]),
+                torch.tensor([[0.0, 0.0, 1.0]]),
+            )[0].tolist()],
+            device=device,
+        ).repeat(num_envs, 1)
 
         # World-space USD scale of each jointed body (see `_attach`)
         self._link_scales = torch.tensor(
@@ -205,6 +220,41 @@ class CaptureManager:
             .TransformDir(marker_pos - root_tf.GetTranslation())
         )
         return (offset[0], offset[1], offset[2])
+
+    def _marker_axis_in_body(self, mep_prim_path: str) -> Tuple[float, float, float]:
+        """Unit axis of the marker cylinder, in the MEP body frame.
+
+        A UsdGeom.Cylinder is authored along its own +Z; the marker's orientation puts
+        that along the MEP's +Y, i.e. pointing out of the end the arm approaches.
+        """
+        marker = self._stage.GetPrimAtPath(f"{mep_prim_path}/{self.cfg.marker_relpath}")
+        cache = UsdGeom.XformCache()
+        root_rot = Gf.Transform(
+            cache.GetLocalToWorldTransform(self._stage.GetPrimAtPath(mep_prim_path))
+        ).GetRotation()
+        marker_rot = Gf.Transform(cache.GetLocalToWorldTransform(marker)).GetRotation()
+        axis = root_rot.GetInverse().TransformDir(
+            marker_rot.TransformDir(Gf.Vec3d(0.0, 0.0, 1.0))
+        )
+        axis = axis.GetNormalized()
+        return (axis[0], axis[1], axis[2])
+
+    def capture_tilt_deg(self, env_id: int) -> float:
+        """Angle between the two capture faces; 0 means they are flush.
+
+        The marker normal points out at the arm and the capture cylinder's axis points
+        in at the MEP, so a flush dock has them exactly anti-parallel.
+        """
+        marker_axis_w = quat_apply(
+            self._mep.data.root_quat_w[env_id].unsqueeze(0),
+            self._marker_axis_mep[env_id].unsqueeze(0),
+        )[0]
+        capture_axis_w = quat_apply(
+            self._robot.data.body_quat_w[env_id, self._link_body_id].unsqueeze(0),
+            self._capture_axis_link[env_id].unsqueeze(0),
+        )[0]
+        cos = torch.clamp(-torch.dot(marker_axis_w, capture_axis_w), -1.0, 1.0)
+        return float(torch.rad2deg(torch.arccos(cos)))
 
     @property
     def robot_capture_pos_w(self) -> torch.Tensor:
@@ -329,6 +379,15 @@ class CaptureManager:
         ## Lab never writes back during simulation (they still hold the spawn poses).
         ## The local frames above come from the live physics poses, so nothing snaps.
 
+        # The fixed joint freezes whatever relative pose the arm arrived with, so this
+        # number is the whole story on how square the capture was. `mep_suction_capture`
+        # aligns to the marker face before docking to keep it small; report it either
+        # way, because a large tilt here is exactly what makes peg-in-hole impossible.
+        self._log(
+            env_id,
+            f"Capture tilt: {self.capture_tilt_deg(env_id):.2f} deg between the "
+            "marker face and the capture face (0 = flush)",
+        )
         self._log(env_id, "MEP attached to Canadarm3")
         self._set_state(env_id, CaptureState.CAPTURED)
 

@@ -290,3 +290,5 @@ Thumbs.db
 .vscode/
 .idea/
 docs/md
+graphify
+graphify*

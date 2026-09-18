@@ -855,12 +855,17 @@ class BaseEnvCfg:
                 return
 
     def _ensure_cuda_sim_device_for_deformable_objects(self):
+        # Deformables are GPU-only, so force CUDA when the scene has one. Scenes without
+        # one keep whatever device was configured.
+        #
+        # NOTE: This used to fall back to "cpu" for every other scene. Because
+        # __post_init__ runs after Hydra applies its overrides, that fallback also
+        # silently undid `env.sim.device=cuda` on the command line, so *every* scene
+        # here stepped physics on the CPU no matter what was asked for.
         for asset_cfg in self.scene.__dict__.values():
             if isinstance(asset_cfg, DeformableObjectCfg):
                 self.sim.device = "cuda"
-                break
-        else:
-            self.sim.device = "cpu"
+                return
 
     def _setup_asset_extras(self):
         def _recursive_impl(attr: Any):
