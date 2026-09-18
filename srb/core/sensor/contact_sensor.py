@@ -65,8 +65,25 @@ def __initialize_impl(self):
     self._body_physx_view = self._physics_sim_view.create_rigid_body_view(
         body_names_glob
     )
+    # A wildcard target matching N environments cannot pair with N*B sensor
+    # bodies. Use one sensor group per environment and literal collider targets.
+    # Each group has B bodies and the same F filters, preserving the (N,B,F,3)
+    # tensor layout without attributing every environment's contacts to env 0.
+    contact_patterns = body_names_glob
+    contact_filters = filter_prim_paths_glob
+    if filter_prim_paths_glob and self._num_envs > 1:
+        contact_patterns = []
+        contact_filters = []
+        for parent in self._parent_prims:
+            parent_path = parent.GetPath().pathString
+            env_prefix = parent_path.split("/env_", 1)[-1].split("/", 1)[0]
+            contact_patterns.append(f"{parent_path}/{body_names_glob.rsplit('/', 1)[-1]}")
+            contact_filters.append([
+                path.replace("/env_0/", f"/env_{env_prefix}/")
+                for path in filter_prim_paths_glob
+            ])
     self._contact_physx_view = self._physics_sim_view.create_rigid_contact_view(
-        body_names_glob, filter_patterns=filter_prim_paths_glob
+        contact_patterns, filter_patterns=contact_filters
     )
     # resolve the true count of bodies
     self._num_bodies = self.body_physx_view.count // self._num_envs
@@ -122,6 +139,16 @@ def __initialize_impl(self):
         self._data.force_matrix_w = torch.zeros(
             self._num_envs, self._num_bodies, num_filters, 3, device=self._device
         )
+
+        # Isaac Lab also resets/updates filtered-force history. Keep the same
+        # allocation semantics as net_forces_w_history, including length zero.
+        if self.cfg.history_length > 0:
+            self._data.force_matrix_w_history = torch.zeros(
+                self._num_envs, self.cfg.history_length, self._num_bodies,
+                num_filters, 3, device=self._device,
+            )
+        else:
+            self._data.force_matrix_w_history = self._data.force_matrix_w.unsqueeze(1)
 
 
 ContactSensor._initialize_impl = __initialize_impl
