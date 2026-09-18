@@ -1,7 +1,8 @@
 from dataclasses import MISSING
-from typing import Sequence
+from typing import Sequence, Tuple
 
 import torch
+from pxr import Gf
 
 from srb import assets
 from srb._typing import StepReturn
@@ -41,6 +42,8 @@ from srb.utils.math import (
 )
 from srb.utils.path import SRB_ASSETS_DIR_SPACE
 
+from .capture import CaptureCfg, CaptureManager, spawn_capture_cylinder
+
 ##############
 ### Config ###
 ##############
@@ -78,8 +81,9 @@ class SceneCfg(ManipulationSceneCfg):
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),
         ),
+        ## NOTE: Pose taken from the reference stage `no_gripper.usd`.
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(3.356, 26.3265, 11.4938),
+            pos=(-14.133586, 33.362941, 11.4938),
             rot=(0.707107, 0.707107, 0.0, 0.0),
         ),
     )
@@ -157,6 +161,33 @@ class TaskCfg(ManipulationEnvCfg):
     episode_length_s: float = 10.0
     is_finite_horizon: bool = True
 
+    ## Capture (magnet-style attachment of the MEP to a gripper-less arm)
+    ## NOTE: Only active when the robot has no end-effector (e.g. `env.robot=canadarm3`);
+    ## the capture cylinder takes the place of the gripper on the flange.
+    capture: CaptureCfg = CaptureCfg()
+
+    ## MEP capture marker, as edited in the reference stage `no_gripper.usd`: the
+    ## marker cylinder is moved/shortened and the disc mount next to it is disabled.
+    ## Set `debris_marker_xform` to None to keep the asset's own marker placement.
+    debris_marker_xform: (
+        Tuple[
+            Tuple[float, float, float],
+            Tuple[float, float, float, float],
+            Tuple[float, float, float],
+        ]
+        | None
+    ) = (
+        (50.63112171724094, 19.997228065784522, -0.1790183312654655),
+        (
+            0.7064827155716957,
+            -0.7057925476247107,
+            0.036989020055530245,
+            0.03702519022496403,
+        ),
+        (0.15000000596046448, 0.14998489618301392, 0.10000000149011612),
+    )
+    debris_inactive_relpaths: Tuple[str, ...] = ("gripper_fixture/DiscMount",)
+
     def __post_init__(self):
         super().__post_init__()
 
@@ -173,7 +204,7 @@ class TaskCfg(ManipulationEnvCfg):
             prim_path="{ENV_REGEX_NS}/debris",
             spawn=UsdFileCfg(
                 usd_path=SRB_ASSETS_DIR_SPACE.joinpath("debris_v3.usd").as_posix(),
-                scale=(1.5, 1.5, 1.5),
+                scale=(1.1, 1.1, 1.1),
                 collision_props=CollisionPropertiesCfg(),
                 ## NOTE: None of the mep USD layers author a mesh collision
                 ## approximation, so PhysX would fall back to convexHull and turn
@@ -186,8 +217,11 @@ class TaskCfg(ManipulationEnvCfg):
                 mass_props=MassPropertiesCfg(density=1000.0),
                 activate_contact_sensors=True,
             ),
+            ## NOTE: Pose taken from the reference stage `no_gripper.usd`, where the
+            ## MEP was moved into the reach of the Canadarm3 (the previous pose was
+            ## ~14.8 m from the flange, beyond the arm's ~8.5 m reach).
             init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(-0.105728, 13.90236, 11.82852),
+                pos=(-0.802966, 11.409131, 8.408625),
                 rot=(0.095277, -0.700659, 0.095277, -0.700659),
                 lin_vel=(0.0, 0.0, 0.0),
                 ang_vel=(0.0, 0.0, 0.0),
@@ -218,7 +252,78 @@ class Task(ManipulationEnv):
         ## Get scene assets
         self._obj: RigidObject = self.scene["debris"]
 
+        ## Capture
+        self._capture: CaptureManager | None = (
+            CaptureManager(
+                self.cfg.capture,
+                stage=self.scene.stage,
+                env_prim_paths=self.scene.env_prim_paths,
+                robot=self._robot,
+                mep=self._obj,
+                flange_offset=self._capture_flange_offset,
+            )
+            if self._capture_enabled
+            else None
+        )
+
+    @property
+    def _capture_enabled(self) -> bool:
+        return self.cfg.capture.enable and self.cfg._robot.end_effector is None
+
+    @property
+    def _capture_flange_offset(self):
+        flange = self.cfg._robot.frame_flange
+        return flange.offset.pos, flange.offset.rot
+
+    def _setup_scene(self):
+        super()._setup_scene()
+
+        ## MEP capture marker (see `TaskCfg.debris_marker_xform`)
+        stage = self.scene.stage
+        debris_name = self.cfg.scene.debris.prim_path.rsplit("/", 1)[-1]
+        for env_prim_path in self.scene.env_prim_paths:
+            debris_prim_path = f"{env_prim_path}/{debris_name}"
+            if self.cfg.debris_marker_xform is not None:
+                marker = stage.GetPrimAtPath(
+                    f"{debris_prim_path}/{self.cfg.capture.marker_relpath}"
+                )
+                translate, orient, scale = self.cfg.debris_marker_xform
+                marker.GetAttribute("xformOp:translate").Set(Gf.Vec3d(*translate))
+                marker.GetAttribute("xformOp:orient").Set(
+                    Gf.Quatd(orient[0], *orient[1:])
+                )
+                marker.GetAttribute("xformOp:scale").Set(Gf.Vec3d(*scale))
+            for relpath in self.cfg.debris_inactive_relpaths:
+                stage.GetPrimAtPath(f"{debris_prim_path}/{relpath}").SetActive(False)
+
+        ## Capture cylinder on the flange link (replaces the gripper)
+        if self._capture_enabled:
+            if self.cfg.capture.robot_link is None:
+                self.cfg.capture.robot_link = self.cfg._robot.frame_flange.prim_relpath
+            spawn_capture_cylinder(
+                self.cfg.capture,
+                f"{self.scene['robot'].cfg.prim_path}/{self.cfg.capture.robot_link}",
+                self._capture_flange_offset,
+            )
+
+    def update_capture(self):
+        """Evaluate the capture condition; call after every physics step."""
+        if self._capture is not None:
+            self._capture.update()
+
+    def release_capture(self, env_ids: Sequence[int] | None = None):
+        if self._capture is not None:
+            self._capture.release(env_ids)
+
+    def _get_dones(self):
+        # Agents that go through `env.step()` get capture updates here, once per step
+        self.update_capture()
+        return super()._get_dones()
+
     def _reset_idx(self, env_ids: Sequence[int]):
+        # Detach before the reset teleports the MEP and the arm, otherwise the fixed
+        # joint would yank them back together
+        self.release_capture(env_ids)
         super()._reset_idx(env_ids)
 
     def extract_step_return(self) -> StepReturn:

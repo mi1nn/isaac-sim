@@ -19,6 +19,10 @@ from srb.utils.cache import (
     update_offline_srb_cache,
 )
 from srb.utils.path import SRB_APPS_DIR, SRB_DIR, SRB_LOGS_DIR
+from srb.utils.process import (
+    install_session_signal_handlers,
+    warn_about_stale_sessions,
+)
 
 if TYPE_CHECKING:
     from isaacsim.simulation_app import SimulationApp
@@ -117,7 +121,9 @@ def run_agent_with_env(
     )
 
     # Launch Isaac Sim
+    warn_about_stale_sessions()
     launcher = AppLauncher(headless=headless, **kwargs)
+    install_session_signal_handlers()
 
     # Update the offline registry cache
     update_offline_srb_cache()
@@ -415,6 +421,15 @@ def manual_agent(
         controller.sync_to_default()
 
     controller.add_callback("L", cb_reset)
+
+    # Tasks with a capture interface (e.g. `debris_capture` with a gripper-less arm)
+    # evaluate it after every physics step; `env.step()` would do it, but this loop
+    # deliberately bypasses it.
+    update_capture = getattr(unwrapped, "update_capture", None)
+    release_capture = getattr(unwrapped, "release_capture", None)
+    if release_capture is not None:
+        controller.add_callback("R", release_capture)
+
     print(controller)
 
     if not autoplay:
@@ -439,6 +454,8 @@ def manual_agent(
             if step_counter % render_interval == 0:
                 sim.render()
             scene.update(dt=physics_dt)
+            if update_capture is not None:
+                update_capture()
 
 
 def teleop_agent(

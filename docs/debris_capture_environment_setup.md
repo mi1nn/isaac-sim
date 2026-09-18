@@ -8,6 +8,10 @@
 - 대상 환경: `debris_capture_visual` (`env.robot=canadarm3+kinova300_large`)
 - 작업 브랜치: `feature/grip`
 
+> **2026-09-18 추가**: 그리퍼 없는 Canadarm3 로 MEP 를 자석처럼 붙이는 capture 작업과
+> Ctrl+Z 문제 조사는 문서 끝의 **[Part 2 — Debris Capture Progress](#part-2--debris-capture-progress)**
+> 에 기록합니다. (Part 1 의 "실행 검증 미실행" 표기는 Part 1 당시 상태이며 Part 2 에서 바꾸지 않았습니다.)
+
 ---
 
 ## 1. 작업 목표
@@ -842,3 +846,307 @@ srb agent manual --env debris_capture_visual \
    debris 의 `scale` 조정이 필요하지만, 기존 배치를 유지하라는 요구에 따라
    **먼저 실측한 뒤에** 판단합니다.
 5. **convexDecomposition 으로 충분한지** — 부족하면 `sdf` 로 상향.
+
+---
+---
+
+# Part 2 — Debris Capture Progress
+
+- 작성: 2026-09-18 / 브랜치 `feature/grip`
+- 목표: 그리퍼 없이(`env.robot=canadarm3`) Canadarm3 7번 축 끝단의 capture cylinder 가
+  MEP 의 marker cylinder 에 가까워지면 자석처럼 결합 → 이후 팔을 따라 MEP 가 이동
+- 실행 머신: Isaac Sim 설치 머신(`/home/rokey`), Isaac Sim `5.0.0-rc.45`, Isaac Lab `v2.2.1`
+  (`isaaclab` 0.45.9), USD 0.24.5
+- **이 Part 의 모든 수치는 실제로 실행/측정한 값입니다.** 실행하지 못한 항목은 `미실행` 으로 적었습니다.
+
+## Step 1. Environment Analysis
+
+### 확인한 파일
+
+| 구분 | 경로 |
+|---|---|
+| 기준 stage | `~/Downloads/no_gripper.usd` (Isaac Sim 에서 저장한 env_0 스냅샷, USD crate) |
+| Task / Visual / 등록 | `project/srb/tasks/manipulation/debris_capture/{task.py,task_visual.py,__init__.py}` |
+| Canadarm3 설정 | `project/srb/assets/robot/manipulation/canadarm3.py` |
+| Canadarm3 USD | `assets/srb_assets/robot/manipulator/canadarm3_large.usdz` |
+| MEP USD 체인 | `assets/space_asset/debris_v3.usd` → `3asset_v3.usd` → `mep_combined.usd` → `mep.usd` |
+| manual agent / 키 입력 | `project/srb/__main__.py` (`manual_agent`), `project/srb/interfaces/manual.py` |
+| base env | `project/srb/core/env/common/base/direct/impl.py`, `.../manipulation/env.py` |
+| 종료/시그널 | `isaacsim/simulation_app/simulation_app.py` (SIGINT), `isaaclab/app/app_launcher.py` (SIGTERM/SIGABRT/SIGSEGV) |
+
+USD 는 Isaac Sim 번들 `omni.usd.libs` 의 `pxr` 로 직접 열어 확인했습니다.
+
+### 환경 구조 / 물리 설정 (실측)
+
+- `no_gripper.usd` 의 `/physicsScene`: `gravityDirection=(0,0,0)`, `gravityMagnitude=-0`,
+  `timeStepsPerSecond=150`, TGS. 실행 중 `sim.cfg.gravity = (0.0, 0.0, -0.0)` 확인
+  (`Domain.ORBIT`). → **이미 무중력이므로 gravity 는 변경하지 않았습니다.**
+- `no_gripper.usd` 에는 `end_effector` prim 이 없습니다 (그리퍼 제거 상태).
+  `env.robot=canadarm3` 로 실행하면 `cfg._robot.end_effector is None` 입니다.
+- `no_gripper.usd` 가 저장소의 현재 설정과 다른 점 (→ Step 2 에서 task 설정에 반영):
+
+  | 항목 | 저장소 설정 (변경 전) | `no_gripper.usd` |
+  |---|---|---|
+  | MEP(`debris`) 위치 | `(-0.105728, 13.90236, 11.82852)` | `(-0.802966, 11.409131, 8.408625)` |
+  | MEP scale | `1.1` (작업 전부터 있던 미커밋 변경) | `1.1` |
+  | satellite 위치 | `(3.356, 26.3265, 11.4938)` | `(-14.133586, 33.362941, 11.4938)` |
+  | `gripper_fixture/Cylinder_01` | 원래 asset 값 (높이 scale 0.568) | 위치/자세 변경, scale `(0.15, 0.149985, 0.1)` |
+  | `gripper_fixture/DiscMount` | active | **inactive** |
+
+### Canadarm3 / Joint 7
+
+| 항목 | 값 (USD 에서 확인) |
+|---|---|
+| Articulation root | `/canadarm3_large` → stage 에서 `/World/envs/env_0/robot` |
+| 베이스 고정 | `canadarm3_large_0/root_joint` (`PhysicsFixedJoint`, body0 없음 = world) |
+| **Joint 7 prim** | `/World/envs/env_0/robot/canadarm3_large_7/canadarm3_large_joint_7` (`PhysicsRevoluteJoint`, body0=`canadarm3_large_6`, body1=`canadarm3_large_7`) |
+| **Joint 7 끝단 링크 (capture cylinder 부모)** | `/World/envs/env_0/robot/canadarm3_large_7` (mass 25 kg) |
+| Flange (그리퍼가 붙던 위치) | `frame_flange`: link7 기준 `(0, 0, -0.44)`, 자세 `rpy(0, 180°, 0)` → 링크 -Z 방향이 바깥 |
+
+### MEP / MEP cylinder
+
+| 항목 | 값 |
+|---|---|
+| MEP prim | `/World/envs/env_0/debris` (`PhysicsRigidBodyAPI`, `PhysicsMassAPI`) |
+| MEP 질량 (실측, `root_physx_view.get_masses()`) | **143,183 kg** (`density=1000` × convex decomposition 부피) |
+| **MEP cylinder prim** | `/World/envs/env_0/debris/gripper_fixture/Cylinder_01` (`UsdGeom.Cylinder`, `radius=0.5`, `height=1`, `axis=Z`) |
+| local xform (`no_gripper.usd`) | translate `(50.6311, 19.9972, -0.1790)`, orient `(0.70648, -0.70579, 0.03699, 0.03703)`, scale `(0.15, 0.149985, 0.1)` |
+| 실제 크기 (MEP scale 1.1 포함) | 반지름 ≈ **0.0825 m**, 높이 ≈ **0.11 m** |
+| 중심 (MEP body frame, 실행 중 계산값) | `(-1.7258, 7.7604, -0.0869)` m |
+| 중심 (world, `no_gripper.usd` 초기 자세) | `(-0.890, 4.391, 4.673)` |
+| collision | `PhysicsCollisionAPI` + convexDecomposition (MEP rigid body 의 일부, 변경 안 함) |
+
+## Step 2. Capture Cylinder
+
+| 항목 | 값 |
+|---|---|
+| prim | `/World/envs/env_0/robot/canadarm3_large_7/capture_cylinder` (자식: `geometry/mesh`, `geometry/material`) |
+| 부모 | Joint 7 끝단 링크 `canadarm3_large_7` → **링크와 함께 움직임** |
+| `CAPTURE_RADIUS` | **0.30 m** (MEP cylinder 0.0825 m 보다 약 3.6배) |
+| `CAPTURE_LENGTH` | **0.40 m** |
+| 위치 | flange 면에서 바깥쪽(링크 -Z)으로 0.4 m. 중심 = link7 기준 `(0, 0, -0.64)` |
+| collision / rigid body / mass | **없음** (시각 표시 전용. 링크 질량·충돌에 영향 없음) |
+| 시각 | 반투명(opacity 0.35), 상태별 색 IDLE 파랑 / APPROACH 노랑 / CAPTURED 초록 (USD shader 입력 변경) |
+
+- 크기는 MEP cylinder 와 **독립 파라미터**입니다 (`CaptureCfg.radius/length`).
+- 길이를 0.6 → 0.4 m 로 줄인 이유: 기존 wrist camera 가 link7 기준 `z=-0.9` 에 있어
+  0.6 m 이면 카메라가 원기둥 안에 들어갑니다. 0.4 m(끝단 `z=-0.84`)면 카메라가 밖에 있습니다.
+- MEP marker 는 `no_gripper.usd` 의 편집값을 `TaskCfg.debris_marker_xform` 으로 적용하고,
+  `DiscMount` 는 `TaskCfg.debris_inactive_relpaths` 로 비활성화합니다 (`Task._setup_scene`).
+- ⚠️ 색 변경이 GUI 화면에 실제로 보이는지는 **미확인** (GUI 실행을 하지 못함, Step 5 참고).
+
+## Step 3. Capture Detection
+
+- 방식: 매 physics step 마다
+  `distance = |robot_capture_pos_w − mep_capture_pos_w|`
+  - `robot_capture_pos_w` = link7 pose(articulation `body_pos_w/quat_w`) ∘ capture cylinder 중심
+  - `mep_capture_pos_w` = MEP root pose ∘ marker cylinder 중심 (시작 시 USD 에서 1회 계산)
+  - 표면 접촉은 필요 없음. **cylinder 크기와 무관하게 두 중심점 거리만 봅니다.**
+- `CAPTURE_DISTANCE_THRESHOLD` = **0.30 m**, APPROACH 진입 거리 2.0 m
+- 상태 전환
+
+  | 현재 | 조건 | 다음 |
+  |---|---|---|
+  | IDLE | distance ≤ 2.0 m | APPROACH |
+  | APPROACH | distance > 2.0 m | IDLE |
+  | IDLE/APPROACH | distance ≤ 0.30 m **및 armed** | CAPTURED (joint 생성) |
+  | CAPTURED | `R` 키 / reset | IDLE (joint 제거) |
+
+- release 직후에는 MEP 가 여전히 capture 영역 안이므로 **disarm** 되고,
+  0.45 m(= 1.5 × threshold) 이상 멀어지면 `Capture re-armed` 로그와 함께 다시 활성화됩니다.
+- 호출 위치: `srb agent manual` 루프(`scene.update()` 직후 `env.update_capture()`),
+  `env.step()` 을 쓰는 agent 는 `Task._get_dones()` 에서 호출.
+- 로그 예 (실제 출력):
+  ```
+  [CAPTURE] Capture cylinder r=0.300 m, L=0.400 m on 'canadarm3_large_7' | threshold 0.300 m | MEP mass 143183 kg
+  [CAPTURE] State: IDLE
+  [CAPTURE] State: APPROACH
+  [CAPTURE] Distance to MEP: 0.338 m
+  [CAPTURE] Distance to MEP: 0.299 m
+  [CAPTURE] Capture condition satisfied
+  [CAPTURE] MEP attached to Canadarm3
+  [CAPTURE] State: CAPTURED
+  ```
+  `G` 키 진단에도 `capture: State: CAPTURED | Distance to MEP: ... (threshold 0.300 m)` 가 표시됩니다.
+
+## Step 4. Attachment
+
+- 방식: capture 순간 **`UsdPhysics.FixedJoint` 를 런타임에 생성** (`/World/envs/env_0/capture_joint`)
+  - body0 = `canadarm3_large_7`, body1 = `debris`
+  - `excludeFromArticulation = True` → 팔 articulation 구조는 그대로, MEP 는 별도 제약으로 결합
+  - joint frame 은 **capture 지점**에 둠. local pose 는 **그 순간의 물리 pose(텐서 값)** 로 계산하므로
+    상대 위치·자세가 그대로 고정됨 (transform 을 매 프레임 복사하는 방식은 쓰지 않음)
+  - PhysX 는 joint localPos 에 body 의 USD scale 을 곱하므로 MEP 쪽 localPos 를 scale(1.1)로 나눔
+    (`omni.physx.scripts.utils.createJoint` 와 같은 규약). 실측 snap 0.00 mm 로 검증.
+- Release: joint prim 제거 (`R` 키 / `Task.release_capture()`), reset 시 자동 release.
+- 개선 이력 (실측):
+
+  | joint anchor 위치 | marker 지점 상대 위치 오차 (정지 후) | 이동 중 최대 |
+  |---|---|---|
+  | MEP 원점 (link7 에서 약 8 m) | 5.9 / 9.8 mm | 17–18 mm |
+  | **capture 지점 (최종)** | **0.04 / 0.08 mm** | **0.17 mm** |
+
+  원인: link7(25 kg) ↔ MEP(143 t) 질량비가 약 1:5700 이라 제약의 미세한 각도 오차가
+  8 m 레버암으로 증폭됐습니다. 상대 각도 오차는 두 경우 모두 ≤ 0.056°.
+- 알려진 경고: capture 순간 PhysX 가
+  `PhysicsUSD: CreateJoint - found a joint with disjointed body transforms ... /World/envs/env_0/capture_joint`
+  를 1회 출력합니다. Isaac Lab 은 시뮬레이션 중 물리 pose 를 USD 에 다시 쓰지 않아서
+  PhysX 가 **초기 위치 그대로인 USD transform** 으로 검사하기 때문입니다.
+  같은 테스트에서 snap 은 0.00 mm 로 측정되어 실제 영향은 없습니다.
+
+## Step 5. Test
+
+### 실행 명령어
+
+```bash
+# 최종 사용 명령 (변경 없음)
+srb agent manual --env debris_capture_visual \
+  --kit_args "--ext-folder /home/rokey/isaac-sim/apps --enable isaacsim.exp.base" \
+  env.robot=canadarm3
+
+# 검증 스크립트 (headless, 창 없음)
+~/isaac-sim/python.sh docs/debris_capture_tests/capture_test.py
+~/isaac-sim/python.sh docs/debris_capture_tests/manual_test.py
+python3 docs/debris_capture_tests/ctrlz_repro.py {fg|rerun|killjob|exit} <log>
+```
+
+### GUI 실행 여부 (중요)
+
+- 작업 시작 시 **변경 전 코드**로 위 GUI 명령을 한 번 실행했습니다. 로드는 진행됐으나 stdout 을
+  파일로 리다이렉트해 `print` 가 버퍼링되어 `[manual]` 출력을 확인하지 못했고, 같은 머신에서
+  팀원이 Isaac Sim 으로 테스트 중이라 약 20분 후 **제 프로세스 그룹만** SIGINT 로 종료했습니다.
+- 이후 팀원 화면과 혼동되지 않도록 **GUI 창을 띄우는 실행은 하지 않았습니다.**
+  → **변경 후 GUI 명령의 사람 손 키보드 조작 테스트는 미실행**입니다.
+- 대신 아래 두 가지로 같은 코드 경로를 headless 에서 검증했습니다.
+
+### Test A — `capture_test.py` (manual 루프와 같은 물리 루프, 관절 목표를 스크립트로 구동) — **16/16 PASS**
+
+| 항목 | 결과 |
+|---|---|
+| capture cylinder prim 존재 | PASS |
+| MEP marker prim 존재, override 적용, DiscMount inactive | PASS |
+| idle 2 s 동안 MEP 정지 | 이동 0.00 m |
+| capture 전 팔 이동 시 MEP 독립 | MEP 이동 0.00 m |
+| 접근 → CAPTURED | 거리 0.299 m 에서 capture (시뮬 34.1 s) |
+| capture 전 접촉으로 MEP 가 밀리지 않음 | 0.00 m |
+| FixedJoint 생성 / snap 없음 | PASS / 0.00 mm |
+| capture 후 팔 이동 → MEP 동반 이동 | 0.383 m, 0.660 m |
+| 상대 transform 유지 (marker 지점) | 0.04 mm / 0.040°, 0.08 mm / 0.056° |
+| release → joint 제거, 팔 1 m 후퇴 | MEP 는 release 순간 속도의 탄도 궤적과 0.22 mm 차이 (따라오지 않음) |
+| re-arm → 재 capture | PASS |
+| capture 상태에서 reset | joint 제거, IDLE, MEP/팔 초기 위치·속도 0 |
+
+### Test B — `manual_test.py` (**실제 `manual_agent()` 루프**, 키보드 장치만 가짜로 교체) — **5/5 PASS**
+
+- `KEY_1` + `UP`×3 → joint 1 이 2.962° 이동
+- 루프 안에서 접근 → `CAPTURED` (manual 루프의 capture hook 동작)
+- capture 후 `N`, `KEY_1`, `DOWN`×5 → MEP 가 10 s 동안 0.110 m 따라 이동
+- `R` → release, `L` → reset 후 IDLE, `G` → capture 상태 표시
+
+### 발생한 오류 / 수정 내용
+
+| 문제 | 원인 | 수정 |
+|---|---|---|
+| anchor 를 MEP 원점에 둔 첫 버전에서 상대 위치 오차 6–10 mm | 질량비 1:5700 + 8 m 레버암 | anchor 를 capture 지점으로 이동 (Step 4) |
+| release 후 MEP 가 "따라온다" 로 판정 (첫 테스트) | 테스트가 팔을 MEP 쪽으로 밀었고, 회전하는 물체의 root 점으로 탄도를 예측함 | 테스트를 후퇴 동작 + COM 기준으로 수정 (코드 문제 아님) |
+| 재 capture 가 안 됨 (첫 테스트) | release 후 거리 0.3 m 에서 바로 재접근 → 의도한 disarm | re-arm 조건과 로그 추가 |
+| wrist camera 가 capture cylinder 안에 들어감 | 길이 0.6 m | 0.4 m 로 축소 |
+
+### 관찰 사항
+
+- MEP 가 143 t 이라 capture 후 팔(`effort_limit_sim=2500`, `stiffness=40000`)이 목표 관절각을
+  20 s 안에 따라가지 못합니다 (예: joint 1 을 5° 명령 → 10 s 동안 MEP 0.110 m 이동).
+  결합은 유지되지만 **느리게** 움직입니다. 질량은 기존 설정(`mass_props=MassPropertiesCfg(density=1000.0)`)
+  이므로 바꾸지 않았습니다.
+- hydra override `env.scene.debris.spawn.mass_props.density=...` /
+  `...rigid_props.solver_position_iteration_count=...` 를 CLI 로 넘겨 봤지만 질량/결과가 동일했습니다
+  (debris 가 `TaskCfg.__post_init__` 에서 생성되는 구조 때문으로 추정, 원인은 **미확인**).
+  질량을 바꾸려면 `task.py` 의 debris `mass_props` 를 직접 수정해야 합니다.
+
+## Step 6. Ctrl+Z Issue
+
+### 재현 방법
+
+- `docs/debris_capture_tests/ctrlz_repro.py`: pty 안의 interactive bash 에서 명령을 실행하고
+  실제 Ctrl+Z 문자(`0x1a`)를 보내 터미널 job control 을 그대로 재현.
+- 팀원 화면과 혼동되지 않도록 `srb agent zero --headless --env debris_capture_visual ... env.robot=canadarm3`
+  로 재현 (프로세스 구조는 `manual` 과 동일: `python.sh`(bash, `exec` 안 함) → `python3`).
+- ⚠️ GUI 창 자체의 반응(창 멈춤 등)은 **미실행**.
+
+### 수정 전 결과
+
+| 시나리오 | 결과 |
+|---|---|
+| Ctrl+Z | `[1]+ Stopped`, `python.sh` / `python3` 둘 다 `T`. GPU 2.7 GB 유지 |
+| → `fg` → Ctrl+C | 정상 재개 후 정상 종료 |
+| → 같은 명령 재실행 | 2번째 실행 자체는 가능. 1번째는 정지 상태로 GPU/RAM 계속 점유 |
+| → `kill %1` | bash 래퍼만 `Terminated`. **`python3` 는 `systemd --user` 밑 고아로 남아 CPU 66–77% 로 계속 실행, GPU 2.7 GB 점유** (3분 이상 관찰) |
+| → 셸 종료 (터미널 닫기와 동일) | 동일하게 **고아로 남음**. Kit 로그에 `PhysX error: PxRigidDynamic::getGlobalPose() not allowed while simulation is running` 등 다수 |
+| 고아에 `kill -INT` | 2–3 s 내 정상 종료, GPU 해제 |
+
+### 원인
+
+1. `srb` 는 `#!/home/rokey/isaac-sim/python.sh` 로 실행되고 `python.sh` 는 `exec` 없이
+   `python3` 를 자식으로 띄웁니다. 즉 터미널 job = 프로세스 2개.
+2. 정지된 job 에 SIGTERM/SIGHUP 이 오면 bash 래퍼는 즉시 죽고, `python3` 는 Isaac Lab
+   `AppLauncher` 의 SIGTERM 핸들러가 **physics step 도중** `SimulationApp.close()` 를 호출합니다.
+   Kit 로그상 `Replicator Stop` 직후 멈추고(PhysX 가 "simulation is running" 오류) 종료되지 않습니다.
+3. 부모가 사라져 `python3` 는 고아가 되고 셸 job 목록에서도 사라지므로, 사용자는 종료된 줄 알고
+   재실행 → 보이지 않는 이전 Isaac Sim 이 GPU/CPU 를 계속 점유합니다.
+4. Ctrl+Z 자체(SIGTSTP/SIGCONT)는 문제를 일으키지 않았습니다 (`fg` 정상).
+5. (참고) 모든 실행에서 `[Omniverse Hub] <defunct>` 좀비 자식이 1개 보이며 이는 종료 시 정리됩니다. 변경하지 않았습니다.
+
+### 수정 방법 (`project/srb/utils/process.py`, `__main__.py`)
+
+- **Ctrl+Z 기본 동작은 그대로** (여전히 suspend). 멈추기 직전에 안내만 출력:
+  ```
+  [srb] Suspended by Ctrl+Z (SIGTSTP): Isaac Sim (PID ...) and its window are frozen but still hold GPU memory.
+  [srb]   resume: fg    |    quit: fg, then Ctrl+C (or: kill %<job>)
+  ```
+- SIGTERM / SIGHUP 을 검증된 Ctrl+C 종료 경로(`SimulationApp` 의 SIGINT 핸들러:
+  `app.shutdown()` → `sys.exit(0)`)로 연결 → 고아/행 방지.
+- 시작 시 같은 사용자의 `srb` 프로세스 중 **정지(`T`)** 또는 **고아(터미널 없음 + 부모가 `python.sh` 아님)**
+  가 있으면 PID 와 정리 방법을 경고로 출력. **자동 종료는 하지 않음** (다른 사람 세션 보호).
+
+### 수정 후 결과 (같은 스크립트로 재실행)
+
+| 시나리오 | 결과 |
+|---|---|
+| Ctrl+Z | 안내 메시지 출력 후 `Stopped` (기본 동작 유지) |
+| → `fg` → Ctrl+C | 정상 재개 / 정상 종료 |
+| → 재실행 | 새 실행이 시작 전에 `PID ... [suspended]` 경고 출력 → 이후 `kill %1` 로 완전 정리 |
+| → `kill %1` | `Terminated`, **python3 까지 종료, 고아 없음, GPU 해제** |
+| → 셸 종료 | **고아 없음, GPU 해제, PhysX error 0 건** |
+
+## Step 7. Final Result
+
+### 구현 완료
+
+- `no_gripper.usd` 기준 배치 반영 (MEP·satellite 위치, marker cylinder, DiscMount 비활성)
+- Joint 7 끝단 링크에 capture cylinder (r 0.3 m, L 0.4 m, 시각 전용)
+- 중심점 거리 기반 capture 판정, IDLE / APPROACH / CAPTURED 상태 + release(`R`) / re-arm
+- 런타임 `UsdPhysics.FixedJoint` 결합 (snap 0.00 mm, 상대 오차 ≤ 0.17 mm / 0.056°)
+- manual 루프 / `env.step()` 양쪽에서 capture 갱신, reset 시 자동 release
+- Ctrl+Z 이후 `kill %job` / 터미널 종료 시 고아 Isaac Sim 이 남던 문제 수정
+- headless 검증 스크립트 3종 (`docs/debris_capture_tests/`)
+
+### 미구현 / 미확인
+
+- **GUI 에서 사람이 키보드로 조작하는 end-to-end 테스트** (팀원 세션 때문에 GUI 창을 띄우지 않음)
+- 상태별 capture cylinder 색 변화의 실제 화면 표시
+- orientation 조건 (1차 목표대로 거리 조건만 사용)
+- `num_envs > 1` (코드는 env 별로 처리하지만 1 env 로만 실행)
+- GUI 에서의 Ctrl+Z (창 멈춤) 동작
+
+### 발견된 문제
+
+- MEP 질량 143 t → capture 후 팔이 매우 느리게 움직임 (결합은 유지)
+- capture 시 PhysX `disjointed body transforms` 경고 1회 (영향 없음, Step 4)
+- `mep.usd` 의 `Cylinder_01.material:binding` 이 참조 범위 밖을 가리킨다는 USD 경고 (Part 1 문제 7 과 동일, 기존)
+
+### 다음 개발 단계
+
+1. GUI 로 위 명령 실행 → `1`~`7`/`↑↓` 로 접근 → `[CAPTURE] State: CAPTURED` 확인 → 팔 이동 시 MEP 동반 이동 확인
+2. MEP 질량을 실제 값에 맞게 조정할지 결정 (`task.py` debris `mass_props`)
+3. 필요 시 orientation 조건 (capture 축과 marker 축의 각도) 추가
+4. 관절 단위 조작 대신 capture 지점 기준 Cartesian 조작 (기존 IK action 활용) 검토

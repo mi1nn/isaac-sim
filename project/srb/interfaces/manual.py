@@ -253,6 +253,10 @@ class ManualJointControlInterface:
                 ).item()
                 lines.append(f"  TCP <-> debris centre distance = {distance:.4f} m")
 
+        capture = getattr(self._env, "_capture", None)
+        if capture is not None:
+            lines.append(f"  capture: {capture.status()}")
+
         print("\n".join(lines))
 
     def print_help(self):
@@ -281,6 +285,7 @@ class ManualJointControlInterface:
             "\t    G               print grasp diagnostics (contacts, velocities)\n"
             "\t    N               hold here (targets <- measured positions)\n"
             "\t    B               back to the configured initial joint pose\n"
+            "\t    R               release a captured MEP (capture tasks only)\n"
             "\t    L               reset the whole scene\n"
             "\t    H               print this help\n"
             "\t------------------------------------------------------------\n"
