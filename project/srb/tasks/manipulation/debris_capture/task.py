@@ -68,7 +68,7 @@ class SceneCfg(ManipulationSceneCfg):
         prim_path="{ENV_REGEX_NS}/satellite",
         spawn=UsdFileCfg(
             usd_path=SRB_ASSETS_DIR_SPACE.joinpath("satellite_v3.usd").as_posix(),
-            scale=(2.0, 2.0, 2.0),
+            scale=(3.5, 3.5, 3.5),
             collision_props=CollisionPropertiesCfg(),
             ## NOTE: The GOES_R meshes author no collision approximation, which PhysX
             ## rejects on a dynamic body (one error per mesh) before silently falling
@@ -81,9 +81,25 @@ class SceneCfg(ManipulationSceneCfg):
             rigid_props=RigidBodyPropertiesCfg(),
             mass_props=MassPropertiesCfg(density=1000.0),
         ),
-        ## NOTE: Pose taken from the reference stage `no_gripper.usd`.
+        ## NOTE: Pose translated (rotation kept from `no_gripper.usd`) so a peg-in-hole
+        ## test between `satellite/GOES_R` and `debris` ("probe" = `Xform_Ares1`, one of
+        ## the 3 sub-parts of the combined MEP rigid body) is physically possible.
+        ## Original pose was pure background scenery, ~25.9 m from `debris`'s root -- far
+        ## outside any possible contact. World-space AABBs (measured at
+        ## scale=(3.5,3.5,3.5)) were used to translate `satellite` so its nearest face
+        ## sits exactly 1.0 m from the *whole* debris body's AABB (not just Ares1's --
+        ## the Fermi telescope sub-part protrudes ~5 m further out and overlapped
+        ## satellite at a first, Ares1-only pass, launching debris 3.5 m on the first
+        ## step), with Y/Z centred on Ares1 specifically so it still faces the probe:
+        ##   debris (whole MEP) AABB: min (-11.142,  4.076, 3.168), max ( 9.420, 14.288, 7.477)
+        ##   Ares1 AABB (for facing) : min ( -1.040,  6.692, 3.168), max (  4.308, 14.288, 7.477)
+        ##   GOES_R AABB (old)       : min (-24.191, -5.530, 1.969), max ( -0.777, 37.368, 23.423)
+        ## The 1.0 m gap is deliberate: spawning with the meshes already interpenetrating
+        ## would make PhysX shove them apart violently on the first physics step (the
+        ## same "Play explosion" issue documented for the Canadarm3/gripper assembly in
+        ## Part 1). Move them the rest of the way together via manual control instead.
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(-14.133586, 33.362941, 11.4938),
+            pos=(20.477156, 27.933948, 4.119992),
             rot=(0.707107, 0.707107, 0.0, 0.0),
         ),
     )

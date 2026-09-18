@@ -11,6 +11,7 @@
 > **2026-09-18 추가**: 그리퍼 없는 Canadarm3 로 MEP 를 자석처럼 붙이는 capture 작업과
 > Ctrl+Z 문제 조사는 문서 끝의 **[Part 2 — Debris Capture Progress](#part-2--debris-capture-progress)**
 > 에 기록합니다. (Part 1 의 "실행 검증 미실행" 표기는 Part 1 당시 상태이며 Part 2 에서 바꾸지 않았습니다.)
+> **Satellite Docking 자동 시연**은 Part 5 와 [`docs/satellite_docking_demo.md`](satellite_docking_demo.md) 참조.
 
 ---
 
@@ -1265,3 +1266,140 @@ GUI 명령(`srb agent manual --env debris_capture_visual ...`)은 이번에도 *
 가 매 step 마다 `distance ≤ distance_threshold` 를 검사합니다. 따라서 threshold 를 막 넘는 그 step 에서
 바로 capture 되어, 로그상 거리값이 threshold 와 거의 같게(0.600 m) 찍힌 것이며 threshold 가 6배가 아니라
 2배(0.3→0.6 m)로 넓어졌다는 것과 모순되지 않습니다.
+
+---
+---
+
+# Part 4 — satellite ↔ debris(Ares1) Peg-in-hole 배치 조사
+
+- 작성: 2026-09-18 / 브랜치 `feature/magnet`
+- 계기: satellite(GOES_R)와 debris(MEP)의 `Xform_Ares1`("probe")로 peg-in-hole 테스트를
+  시도하는데 satellite가 rigid body 없는 것처럼 통과해버린다는 문제 보고.
+
+## 조사 결과 (실측)
+
+1. **satellite의 RigidBody/Collision은 정상 설정되어 있었음** — `PhysicsRigidBodyAPI`는
+   `satellite` prim 자체가 아니라 자식 prim `satellite/GOES_R`에 적용되어 있어, GUI에서
+   `satellite`(부모)를 선택하면 Physics 속성이 안 보이는 것이었음. 모든 mesh 의
+   `physics:collisionEnabled` 도 `True`로 확인.
+2. **실제 원인은 Isaac Sim이 Stop(정지) 상태였던 것.** 사용자 확인: "Stop 상태에서 프림을
+   드래그해서 가까이 놓았음". PhysX는 Stop 상태에서 전혀 동작하지 않으므로, rigid body 설정과
+   무관하게 어떤 prim이든 자유롭게 서로 통과/겹침. → **standalone 스크립트나 별도 설정 불필요.**
+3. **배치 자체가 물리적으로 닿을 수 없는 거리였음** — 기본 `init_state` 기준 satellite ↔
+   debris(MEP) 원점 거리 **25.87 m** (satellite 는 원래 순수 배경 장식으로 배치된 값).
+
+## 수정 내용
+
+`SceneCfg.satellite.init_state.pos` 를 `Xform_Ares1`("probe") 근처로 평행이동
+(rotation 은 유지):
+
+| | 이전 | 이후 |
+|---|---|---|
+| satellite `init_state.pos` | `(-14.133586, 33.362941, 11.4938)` | **`(20.477156, 27.933948, 4.119992)`** |
+| satellite ↔ debris 원점 거리 | 25.87 m | 27.28 m (※ 아래 참고) |
+
+※ 원점(root) 거리는 오히려 늘었지만, 이건 정상입니다 — root 위치가 아니라 **실제 mesh 표면 간
+간격**이 중요합니다. debris(MEP)는 Ares1 + Fermi 망원경 + gripper_fixture 3개 서브파트가 결합된
+하나의 rigid body이고, root 는 그 세 파트 어디의 중심도 아닙니다.
+
+### 첫 시도가 실패한 이유 (기록)
+
+처음에는 Ares1 의 world AABB 만 기준으로 계산해서 "Ares1 과 1.0 m 간격"으로 배치했습니다.
+결과: **spawn 직후 2초 만에 debris 가 3.54 m 튕겨나감** (satellite 는 0.006 m 만 움직임 —
+질량비 3,000 kg : 1,792,459 kg ≈ 1:600 이라 debris 쪽이 충격을 거의 다 흡수).
+원인: Fermi 망원경 서브파트가 Ares1 보다 +X 방향으로 약 5 m 더 튀어나와 있어서, Ares1 기준으로만
+비워둔 자리에 Fermi 망원경이 satellite 와 겹쳐 있었음 (AABB 겹침 직접 확인).
+
+### 최종 배치 기준
+
+- **간격 기준 축**: debris 전체(3개 서브파트 결합) world AABB 의 +X 경계
+- **간격 값**: 1.0 m (spawn 시 겹치지 않도록 — Part 1 의 "Play 폭발" 문제와 동일한 원리로,
+  겹친 채로 spawn 하면 PhysX 가 첫 스텝에 강하게 밀어냄)
+- **Y/Z 정렬 기준**: Ares1 자신의 AABB 중심 (peg-in-hole 진행 방향이 Ares1 을 정면으로 향하도록)
+
+```
+debris (전체 MEP) AABB : min(-11.142,  4.076, 3.168) max( 9.420, 14.288, 7.477)
+Ares1 AABB (정렬 기준)  : min( -1.040,  6.692, 3.168) max(  4.308, 14.288, 7.477)
+satellite/GOES_R AABB(구) : min(-24.191, -5.530, 1.969) max( -0.777, 37.368, 23.423)
+```
+
+## 검증 (headless, 실행 완료)
+
+`gymnasium.make("srb/debris_capture_visual", ...)` 로 실제 spawn 후 300 스텝(2초) 진행:
+
+| 확인 항목 | 결과 |
+|---|---|
+| spawn 시 debris 전체 AABB 와 satellite AABB 겹침 없음 | ✅ (겹침 없음 확인) |
+| Play 후 satellite 가 튕겨나가지 않음 | ✅ 이동 0.0000 m, `|v|`=0.0000 m/s |
+| Play 후 debris(MEP) 가 튕겨나가지 않음 | ✅ 이동 2.38e-07 m (수치 오차 수준) |
+| arm 에 영향 없음 | ✅ 이동 0.00 m |
+
+## 남은 작업 (미실행)
+
+- Ares1 앞에 약 6.1 m 의 여유 공간이 생겼습니다 (전체 MEP 기준으로 간격을 계산했기 때문). 이
+  공간을 통해 **manual 조작으로 satellite 쪽을 향해 Ares1 을 접근시키는 실제 peg-in-hole 테스트는
+  아직 실행하지 않았습니다.** GUI 로 `srb agent manual --env debris_capture_visual ... env.robot=canadarm3`
+  재실행 후 확인 필요.
+- satellite(GOES_R) mesh 가 매우 큽니다 (scale 3.5 기준 AABB 약 23×43×22 m). "hole" 로 삼을 구체적인
+  sub-mesh(예: 안테나 마운트, 프레임 구조 등)는 지정하지 않았고, 지금은 전체 satellite 구조물이
+  Ares1 근처에 놓인 상태입니다. 실제로 어느 부분에 꽂을지는 GUI 에서 시각적으로 확인 후 조정이
+  필요할 수 있습니다.
+
+---
+---
+
+# Part 5 — Satellite Docking Demo (자동 시연)
+
+- 작성: 2026-09-18 / 브랜치 `feature/magnet`
+- 실행 가이드: **[`docs/satellite_docking_demo.md`](satellite_docking_demo.md)** (실행 명령, 순서, 색상, 키, 문제 해결, 검증 결과)
+- 목표: Python 파일 하나로 Canadarm3 → MEP 면접촉 부착 → 운반 → Probe(Ares1) 를 Satellite Thruster
+  노즐에 삽입 → 자동 도킹 → R 해제까지 자동 수행.
+
+## 조사 결과 (실측)
+
+| 대상 | 결과 |
+|---|---|
+| 기존 부착 코드 | `debris_capture/capture.py` (`CaptureManager`: 런타임 `UsdPhysics.FixedJoint`, R 해제, 파랑/노랑/초록), `__main__.py` manual 루프 |
+| 기존 IK | Canadarm3 action = Isaac Lab `DifferentialInverseKinematicsAction` (DLS) → 데모에서 `DifferentialIKController`(DLS) 재사용 |
+| EE 접촉부 | `canadarm3_large_7/capture_cylinder` 바깥 끝면: 링크 frame `(0, 0, −0.84)`, 법선 링크 −Z, 반지름 0.6 m |
+| MEP 부착면 | Fermi 본체 상단 평면(MEP 로컬 +Y 법선), 중심 body frame `(−1.808, 7.805, −0.055)`, 반폭 1.041 m, 면적 4.33 m², probe 축과 동축 |
+| Probe | `debris/Xform_Ares1` 막대, 선단 `(−1.810, −2.436, 0.107)`, 축 `(0, −0.9997, 0.0236)` (부착면 법선과 1.35° 어긋난 에셋), 선단 반지름 0.08 m |
+| Thruster | `satellite/GOES_R/Thruster/Mesh_1372` 벨 노즐, 축 = GOES_R 로컬 +Y(안쪽), 출구 반지름 0.542 m (scale 3.5) |
+| Thruster collider | GOES_R 전체 `convexHull` → 노즐이 꽉 찬 원뿔, 입구부터 축을 막음 (SEIS·버스·ThrustRim hull은 도킹 경로를 막지 않음을 수치 검사) |
+| Canadarm3 관절 | 7개 모두 연속 관절(USD 한계 −inf~inf), base는 `root_joint`로 world 고정 |
+
+## 구현
+
+| 파일 | 내용 |
+|---|---|
+| `project/srb/tasks/manipulation/debris_capture/docking.py` (신규) | USD 기하 추출(EE 접촉면, MEP 부착면, probe 선단/축, 노즐), 배치 역산, 노즐 collider 재구성, `DockingManager`(MEP↔Satellite FixedJoint), `DockingTaskCfg`/`DockingTask` |
+| `project/srb/tasks/manipulation/debris_capture/docking_demo.py` (신규) | 상태머신, 계획(kinematic IK 도달성 + clearance), 6-DoF 조건 검사, 색상, R 키 |
+| `project/scripts/satellite_docking_demo.py` (신규) | 실행 진입점 (Isaac Sim python) |
+| `project/srb/tasks/manipulation/debris_capture/__init__.py` | `debris_capture_docking` 등록 |
+| `project/srb/tasks/manipulation/debris_capture/capture.py` | `CaptureCfg.collision`, `CaptureCfg.auto_attach` 추가(기본값 = 기존 동작), `attach()/is_attached()/set_color()` 공개 |
+| `docs/debris_capture_tests/capture_test.py` | 질량 검사를 cfg 값(현재 3000 kg) 기준으로 변경 |
+| `docs/satellite_docking_demo.md` (신규) | 실행 가이드 |
+
+변경하지 않은 것: Canadarm3 scale/base/physics/actuator, MEP scale/질량(3000 kg), Satellite scale(3.5),
+USD 에셋 파일, 기존 `debris_capture(_visual)` 태스크 동작.
+
+## 개발 중 발견·수정한 문제 (실측 기반)
+
+| 문제 | 원인 | 조치 |
+|---|---|---|
+| probe 축이 22° 기울게 추출 | Ares1 아래 떨어진 작은 mesh가 PCA를 끌어당김 | trimmed PCA |
+| 부착면이 작은 조각/sliver로 선택 | probe 축과 면 법선이 1.35° 어긋남 | 기준 법선 + 1 cm 평면 묶음 + 최소 면적 |
+| 팔이 매우 느림 | 과감쇠 구동(K 40000, D 25000)인데 관절 목표 선행량을 0.01 rad로 제한 | 0.06 rad |
+| 삽입 끝 선단 흔들림 22~66 mm | 3 t MEP + 10 m 레버암 → 팔+payload 모드 감쇠비 약 0.1, 주기 약 20 s. 목표 급정지/게이트 on-off가 가진 | 정밀 구간 연속 속도 프로파일(가속 제한, 남은 거리 비례 감속, 추종 오차 연속 감속), 운반 중 IK 제어점을 probe 선단으로 전환 |
+| 속도 피드백 감쇠 시도 → 고주파 진동 | 1스텝 지연 속도 피드백을 위치 목표에 섞어 불안정 | **폐기**(코드 제거) |
+| 정착 판정이 통과 안 됨 | flange의 PhysX 순간 속도에 solver jitter(선단에서 약 5 mm/s)가 섞여 있음 | 0.5 s 창의 실제 변위로 판정 |
+
+## 검증 (실행 완료)
+
+- 도킹 데모 headless: **25/25 PASS, exit 0** (동일 코드 2회, 동일 결과). 수치는 `satellite_docking_demo.md` 참조.
+- 도킹 데모 GUI: `--exit_after 3`으로 창·`isaacsim.exp.base`·INIT/PLAN·이동 시작까지 오류 없음.
+- 기존 수동 capture 환경 회귀: `capture_test.py` **19/19**, `manual_test.py` **5/5** PASS.
+
+## 미실행 / 사용자 확인 필요
+
+- GUI로 전체 시연 끝까지 보기, 색상 변화의 화면 표시, 실제 R 키 입력 (콜백 자체는 `--test_undock`으로 검증).

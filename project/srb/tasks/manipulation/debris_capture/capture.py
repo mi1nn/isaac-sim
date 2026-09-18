@@ -55,6 +55,9 @@ class CaptureCfg:
     color_approach: Tuple[float, float, float] = (1.0, 0.8, 0.0)
     color_captured: Tuple[float, float, float] = (0.0, 1.0, 0.2)
     opacity: float = 0.35
+    # Give the capture cylinder a collider so its end face can physically touch the MEP
+    # (a shape of the flange link). Off by default: the cylinder is then visual-only.
+    collision: bool = False
 
     ## MEP side
     # Marker cylinder whose centre is the capture target (relative to the MEP prim)
@@ -71,6 +74,9 @@ class CaptureCfg:
     rearm_factor: float = 1.5
     # Minimum change of distance between two "[CAPTURE] Distance" log lines [m]
     log_distance_step: float = 0.05
+    # Attach as soon as the distance condition holds. Disable when an external
+    # controller (e.g. the docking demo) decides when to attach via `attach()`.
+    auto_attach: bool = True
 
 
 def capture_cylinder_pose(cfg: CaptureCfg, flange_offset: Pose) -> Pose:
@@ -90,10 +96,11 @@ def capture_cylinder_pose(cfg: CaptureCfg, flange_offset: Pose) -> Pose:
 def spawn_capture_cylinder(cfg: CaptureCfg, link_prim_path: str, flange_offset: Pose):
     """Spawn the visual-only capture cylinder under the arm link (env regex allowed).
 
-    It has no collision, rigid body or mass on purpose: it only visualises the
-    capture region and follows the link because it is parented to it.
+    It has no rigid body or mass on purpose: it follows the link because it is
+    parented to it. It is visual-only unless `cfg.collision` adds a collider, which
+    then becomes an extra collision shape of the link.
     """
-    from srb.core.sim import CylinderCfg, PreviewSurfaceCfg
+    from srb.core.sim import CollisionPropertiesCfg, CylinderCfg, PreviewSurfaceCfg
 
     pos, rot = capture_cylinder_pose(cfg, flange_offset)
     shape_cfg = CylinderCfg(
@@ -103,6 +110,7 @@ def spawn_capture_cylinder(cfg: CaptureCfg, link_prim_path: str, flange_offset: 
         visual_material=PreviewSurfaceCfg(
             diffuse_color=cfg.color_idle, opacity=cfg.opacity
         ),
+        collision_props=CollisionPropertiesCfg() if cfg.collision else None,
     )
     shape_cfg.func(
         f"{link_prim_path}/capture_cylinder",
@@ -241,7 +249,11 @@ class CaptureManager:
                 continue
             distance = float(self.distance[env_id])
 
-            if distance <= self.cfg.distance_threshold and bool(self._armed[env_id]):
+            if (
+                self.cfg.auto_attach
+                and distance <= self.cfg.distance_threshold
+                and bool(self._armed[env_id])
+            ):
                 self._log(env_id, f"Distance to MEP: {distance:.3f} m")
                 self._log(env_id, "Capture condition satisfied")
                 self._attach(env_id)
@@ -283,6 +295,30 @@ class CaptureManager:
             if int(self.state[env_id]) != CaptureState.IDLE:
                 self._set_state(env_id, CaptureState.IDLE)
             self._last_logged_distance[env_id] = float("inf")
+
+    def attach(self, env_id: int = 0):
+        """Attach now, regardless of the distance condition (caller has checked it)."""
+        if self.is_attached(env_id):
+            return
+        self._attach(env_id)
+
+    def is_attached(self, env_id: int = 0) -> bool:
+        return self._stage.GetPrimAtPath(self._joint_prim_paths[env_id]).IsValid()
+
+    def set_color(self, env_id: int, color: Tuple[float, float, float]):
+        self._set_cylinder_color(env_id, color)
+
+    @property
+    def link_body_id(self) -> int:
+        return self._link_body_id
+
+    @property
+    def link_prim_paths(self) -> Sequence[str]:
+        return self._link_prim_paths
+
+    @property
+    def mep_prim_paths(self) -> Sequence[str]:
+        return self._mep_prim_paths
 
     def status(self, env_id: int = 0) -> str:
         return (

@@ -63,8 +63,9 @@ def main(env_cfg, agent_cfg=None):
     print("[INFO] gravity:", sim.cfg.gravity)
     mep_mass = mep.root_physx_view.get_masses().sum().item()
     print("[INFO] MEP mass [kg]:", mep_mass)
-    check("MEP mass set to ~1000 kg (was ~143,183 kg with density=1000)",
-          abs(mep_mass - 1000.0) < 5.0, f"{mep_mass:.1f} kg")
+    cfg_mass = env_cfg.scene.debris.spawn.mass_props.mass
+    check("MEP mass matches the configured mass_props.mass (was ~143,183 kg with density=1000)",
+          cfg_mass is not None and abs(mep_mass - cfg_mass) < 0.005 * cfg_mass, f"{mep_mass:.1f} kg (configured {cfg_mass} kg)")
     print(f"[INFO] capture cylinder radius={cap.cfg.radius:.3f} m, distance_threshold={cap.cfg.distance_threshold:.3f} m")
     print("[INFO] MEP marker offset in body frame:", cap._capture_point_mep.tolist())
     print("[INFO] robot capture point in link frame:", cap._capture_point_link.tolist())
