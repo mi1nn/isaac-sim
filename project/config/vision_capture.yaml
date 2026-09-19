@@ -1,0 +1,144 @@
+# MRV Phase 1 -- AprilTag vision capture of a linearly drifting 3 t MEP.
+#
+# Loaded by `srb/tasks/manipulation/debris_capture/vision.py` (`load_vision_config`).
+# Every value can be overridden from the command line of
+# `project/scripts/vision_capture.py`, e.g. `--set mep.linear_velocity_mps=0.02`.
+# Geometry-derived values (Cylinder_01 pose, grasp face, EE contact face) are NOT set
+# here: they are measured from the spawned USD at startup and written to the logs.
+
+mep:
+  mass_kg: 3000.0
+  # Phase 1: pure linear drift, no roll / pitch / yaw rate
+  linear_velocity_mps: 0.01
+  # World-frame drift direction (normalised at load time). Perpendicular to the arm's
+  # approach axis (world +X) so the prediction has to lead the target sideways.
+  drift_direction: [0.0, -0.8, 0.6]
+  angular_velocity_deg_s: 0.0
+  # The MEP starts `rendezvous_time_s * linear_velocity_mps` upstream of its nominal
+  # (reachability-checked) pose, so it drifts through the nominal pose during the run.
+  rendezvous_time_s: 15.0
+
+camera:
+  name: cam_wrist
+  width: 1280
+  height: 720
+  # 90 deg (vertical +-29.4 deg): the tags around the 0.20 m marker must stay in view
+  # at the final 50 mm gap (with 70 deg they would not fit)
+  horizontal_fov_deg: 90.0
+  # USD camera horizontal aperture [mm]; focal length is derived from the FOV
+  horizontal_aperture_mm: 20.955
+  clipping_range_m: [0.01, 100.0]
+  # Mount on the Canadarm3 last link (canadarm3_large_7), on the EE axis, looking
+  # along the capture direction (link -Z). The flange face is at z = -0.44 m and the
+  # EE contact face (end of the capture cylinder) at z = -0.84 m.
+  mount_link_z_m: -0.45
+  # RTX anti-aliasing for the whole app: Off | FXAA | DLSS | TAA | DLAA
+  antialiasing: "Off"
+  # Render 2x and area-downsample (true coverage anti-aliasing of the tag edges):
+  # single-image reprojection RMS 0.63 -> 0.42 px in the static test
+  supersample: 2
+
+apriltag:
+  family: tag36h11
+  # Fixed IDs, in the order Tag0..Tag3 at (-d,+d), (+d,+d), (+d,-d), (-d,-d)
+  ids: [0, 1, 2, 3]
+  # Side of the black square (the detected corners) [m]
+  tag_size_m: 0.06
+  # d: tag centre offset from the constellation centre along each in-plane axis [m]
+  # Outside the 0.20 m marker: nearest tag corner (with quiet zone) 216 mm from the axis
+  constellation_half_width_m: 0.19
+  # White quiet zone around each tag, in tag cells (a 36h11 tag is 8 cells wide)
+  quiet_zone_cells: 1
+  # Tags sit this far above the MEP attachment face (avoids z-fighting) [m]
+  face_offset_m: 0.001
+  texture_px_per_cell: 40
+  # Pose is only valid with the full constellation (Phase 1 keeps all 4 in view)
+  min_tags_for_pose: 4
+  use_ransac: true
+  ransac_reprojection_px: 3.0
+  max_reprojection_rms_px: 1.5
+  # Planar PnP ambiguity: when both IPPE solutions fit within this RMS factor, use the
+  # one closer to the fused (window-mean) orientation
+  ambiguity_ratio: 1.5
+
+vision:
+  rate_hz: 10.0
+  # Last valid pose is held for this long when tags are lost, then the arm stops
+  tag_loss_timeout_s: 1.0
+
+prediction:
+  horizon_sec: 0.3
+  # Least-squares velocity over the most recent estimates within this window
+  velocity_window_sec: 2.0
+  # Constant orientation (no rotation in Phase 1): averaged over a longer window.
+  # Single-image tilt noise at the 1.0 m observation distance stays correlated for
+  # ~1 s, so a 2 s mean left up to 0.58 deg; the static test samples once this
+  # window was filled from the measured standoff.
+  orientation_window_sec: 5.0
+  min_samples: 10
+  # Estimated speed above this is rejected as a bad estimate [m/s]
+  max_plausible_speed_mps: 0.2
+
+approach:
+  # Start the scenario with the arm at the observation pose: nominal (configured)
+  # rendezvous EE pose backed off `observe_distance_m` along the approach axis.
+  # This is a configured search pose, not ground truth.
+  start_at_observe_pose: true
+  # 0.7 m keeps each 60 mm tag at ~34 px with the 90 deg lens (36h11 decodes from ~30 px)
+  observe_distance_m: 0.7
+  # Stage A/B: track the predicted target this far in front of the MEP face [m]
+  approach_standoff_m: 0.6
+  # Final EE-contact-face to MEP-face gap at capture [m]
+  final_gap_m: 0.05
+  speed_far_mps: 0.10
+  speed_near_mps: 0.04
+  speed_capture_range_mps: 0.01
+  near_distance_m: 0.30   # standoff below which `speed_near` applies
+  capture_range_m: 0.12   # standoff below which `speed_capture_range` applies
+  speed_ang_deg_s: 6.0
+  # Tracking gates: standoff only decreases while the EE is on the predicted axis
+  gate_lateral_m: 0.01
+  gate_angle_deg: 1.0
+  settle_lateral_m: 0.02
+  settle_angle_deg: 1.0
+  max_joint_step_rad: 0.04
+  ik_lambda: 0.05
+  stage_timeout_s: 60.0
+
+capture:
+  # EE contact point <-> estimated Cylinder_01 centre. At the final gap this is
+  # final_gap + 0.045 m (Cylinder_01 centre sits 45 mm below the tag plane).
+  max_distance_m: 0.15
+  max_angle_deg: 5.0
+  max_relative_velocity_mps: 0.05
+  # Condition 4 (valid approach direction): EE on the outer side of the face and
+  # within this lateral offset from the Cylinder_01 axis
+  max_lateral_m: 0.02
+  # Translucent EE capture cylinder sized to the Canadarm3 flange (link radius
+  # 0.17 - 0.19 m there). The MEP marker Cylinder_01 is scaled to the same radius
+  # (its position, orientation and height are unchanged): when aligned the two
+  # overlap exactly, so any offset is visible. The wrist camera looks through it.
+  cylinder_radius_m: 0.20
+  # 1.0 = no refraction through the cylinder in front of the camera
+  cylinder_ior: 1.0
+
+test:
+  static_position_threshold_mm: 5.0
+  static_angle_threshold_deg: 0.5
+  # Static test: observe the stationary MEP from these standoffs [m], N samples each
+  static_standoffs_m: [0.7, 0.4, 0.2]
+  static_samples: 30
+  dynamic_timeout_sec: 60.0
+  holding_duration_sec: 10.0
+  holding_max_relative_drift_mm: 5.0
+  holding_max_relative_drift_deg: 0.5
+  # After holding, slowly back the EE off along the face normal with the MEP attached
+  retreat_distance_m: 0.2
+  retreat_speed_mps: 0.01
+
+logging:
+  dir: logs/vision_capture
+  csv: logs/vision_capture_metrics.csv
+  rate_hz: 10.0
+  overlay_every_sec: 1.0
+  debug_draw: true

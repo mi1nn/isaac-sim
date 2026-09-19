@@ -3,6 +3,7 @@ from srb.utils.registry import register_srb_tasks
 from .docking import DockingTask, DockingTaskCfg
 from .task import Task, TaskCfg
 from .task_visual import VisualTask, VisualTaskCfg
+from .vision_task import VisionCaptureTask, VisionCaptureTaskCfg
 
 BASE_TASK_NAME = __name__.split(".")[-1]
 register_srb_tasks(
@@ -15,6 +16,10 @@ register_srb_tasks(
         f"{BASE_TASK_NAME}_docking": {
             "entry_point": DockingTask,
             "task_cfg": DockingTaskCfg,
+        },
+        f"{BASE_TASK_NAME}_vision": {
+            "entry_point": VisionCaptureTask,
+            "task_cfg": VisionCaptureTaskCfg,
         },
     },
     default_entry_point=Task,
