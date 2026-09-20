@@ -1,6 +1,7 @@
 # MRV Phase 1 — AprilTag 비전 포획 (선형 유영 3 t MEP)
 
 요구사항: [`mrv_phase1_apriltag_capture_prompt_linear_drift.md`](mrv_phase1_apriltag_capture_prompt_linear_drift.md)
+6-DoF 확장 (XYZ 병진 + 복합회전, `mep.motion_mode: six_dof`): [`mrv_six_dof_capture.md`](mrv_six_dof_capture.md)
 결과 보고서: `project/logs/phase1_result.md` · 작업 로그: `project/logs/phase1_progress.md` (둘 다 `logs/`라 git 에서 제외됨)
 
 ## 개요

@@ -1,4 +1,5 @@
-# MRV Phase 1 -- AprilTag vision capture of a linearly drifting 3 t MEP.
+# MRV -- AprilTag vision capture of a free-floating 3 t MEP
+# (Phase 1: linear drift, `mep.motion_mode: translation_only`; 6-DoF: `six_dof`).
 #
 # Loaded by `srb/tasks/manipulation/debris_capture/vision.py` (`load_vision_config`).
 # Every value can be overridden from the command line of
@@ -8,14 +9,27 @@
 
 mep:
   mass_kg: 3000.0
-  # Phase 1: pure linear drift, no roll / pitch / yaw rate
+  # translation_only: Phase 1 linear drift (angular_velocity_rad_s is NOT applied)
+  # six_dof:          XYZ drift + combined roll/pitch/yaw rate (angular_velocity_rad_s)
+  #   ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --set mep.motion_mode=six_dof
+  motion_mode: translation_only
+  # Linear velocity [m/s] (world, MEP centre of mass) = drift_direction * linear_velocity_mps
+  # = [vx, vy, vz] = [0.0, -0.008, 0.006] m/s with the values below
   linear_velocity_mps: 0.01
   # World-frame drift direction (normalised at load time). Perpendicular to the arm's
   # approach axis (world +X) so the prediction has to lead the target sideways.
   drift_direction: [0.0, -0.8, 0.6]
-  angular_velocity_deg_s: 0.0
+  # six_dof only: [wx, wy, wz] [rad/s], WORLD frame (Isaac Lab init_state.ang_vel).
+  # Low start value for the first Isaac Sim run: |w| = 0.0087 rad/s = 0.50 deg/s
+  # (7.5 deg over the rendezvous time). Must stay below
+  # prediction.max_plausible_angular_rate_rad_s.
+  angular_velocity_rad_s: [0.005, -0.004, 0.006]
   # The MEP starts `rendezvous_time_s * linear_velocity_mps` upstream of its nominal
   # (reachability-checked) pose, so it drifts through the nominal pose during the run.
+  # six_dof: the start orientation is also rotated back by Exp(-[w] t) about
+  # Cylinder_01, so the MEP turns through the nominal orientation at the same time;
+  # the position then passes the nominal only approximately (PhysX rotates the body
+  # about its centre of mass -- see docs/mrv_six_dof_capture.md).
   rendezvous_time_s: 15.0
 
 camera:
@@ -67,17 +81,29 @@ vision:
   tag_loss_timeout_s: 1.0
 
 prediction:
+  # Prediction horizon [s] (simulation time)
   horizon_sec: 0.3
-  # Least-squares velocity over the most recent estimates within this window
+  # Least-squares velocity over the most recent estimates within this window [s]
   velocity_window_sec: 2.0
-  # Constant orientation (no rotation in Phase 1): averaged over a longer window.
+  # translation_only: constant orientation, averaged over this longer window [s].
   # Single-image tilt noise at the 1.0 m observation distance stays correlated for
   # ~1 s, so a 2 s mean left up to 0.58 deg; the static test samples once this
   # window was filled from the measured standoff.
+  # six_dof: least-squares angular velocity + orientation fit over this window [s]
   orientation_window_sec: 5.0
   min_samples: 10
   # Estimated speed above this is rejected as a bad estimate [m/s]
   max_plausible_speed_mps: 0.2
+  # six_dof: estimated angular rate above this is rejected as a bad estimate [rad/s]
+  max_plausible_angular_rate_rad_s: 0.2
+  # six_dof: frame fitted with constant linear + angular velocity, then mapped to
+  # Cylinder_01 with a fixed transform.
+  #   tag:     the PnP-measured tag constellation (vision + design-time T_T_Y only)
+  #   mep_com: the MEP centre of mass (mass property read once from the model); the only
+  #            point that moves in a straight line in free flight. With `tag`, the
+  #            centripetal motion of the tags about the COM biases the fit by about
+  #            |w|^2 r (T^2/12 + T h/2 + h^2/2): ~0.1 mm at 0.5 deg/s, ~7 mm at 5 deg/s (r ~ 2 m)
+  reference_frame: tag
 
 approach:
   # Start the scenario with the arm at the observation pose: nominal (configured)
@@ -111,6 +137,9 @@ capture:
   max_distance_m: 0.15
   max_angle_deg: 5.0
   max_relative_velocity_mps: 0.05
+  # six_dof only (new condition): |w_EE - w_MEP| [rad/s]. 0.01 rad/s = 0.57 deg/s
+  # (2 mm/s at the 0.2 m cylinder rim). Proposed value -- tune in Isaac Sim.
+  max_relative_angular_velocity_rad_s: 0.01
   # Condition 4 (valid approach direction): EE on the outer side of the face and
   # within this lateral offset from the Cylinder_01 axis
   max_lateral_m: 0.02
@@ -140,5 +169,8 @@ logging:
   dir: logs/vision_capture
   csv: logs/vision_capture_metrics.csv
   rate_hz: 10.0
+  # Per-run metrics CSV on/off (the result JSON is always written)
+  csv_enabled: true
   overlay_every_sec: 1.0
+  # Isaac Sim debug draw (points, axes, velocity vectors); the 2D overlay is always saved
   debug_draw: true

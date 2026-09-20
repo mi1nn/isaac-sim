@@ -54,7 +54,9 @@ def k(cfg):
 
 def test_config_defaults(cfg):
     assert cfg.mep.mass_kg == 3000.0
-    assert cfg.mep.angular_velocity_deg_s == 0.0
+    # Phase 1 default: translation only, the configured angular velocity is not applied
+    assert cfg.mep.motion_mode == "translation_only"
+    assert np.array_equal(cfg.mep.angular_velocity_w(), np.zeros(3))
     assert 0.01 <= cfg.mep.linear_velocity_mps <= 0.02
     assert cfg.prediction.horizon_sec == 0.3
     assert cfg.apriltag.family == "tag36h11"
@@ -66,8 +68,23 @@ def test_config_override(cfg):
     assert c.mep.linear_velocity_mps == 0.02 and c.prediction.horizon_sec == 0.5
     with pytest.raises(KeyError):
         vision.load_vision_config(overrides=["mep.nope=1"])
-    with pytest.raises(ValueError):
+    with pytest.raises(KeyError):  # replaced by mep.angular_velocity_rad_s
         vision.load_vision_config(overrides=["mep.angular_velocity_deg_s=1.0"])
+    with pytest.raises(ValueError):
+        vision.load_vision_config(overrides=["mep.motion_mode=rotation_only"])
+    with pytest.raises(ValueError):
+        vision.load_vision_config(overrides=["mep.angular_velocity_rad_s=[0.1, 0.2]"])
+    with pytest.raises(ValueError):  # above prediction.max_plausible_angular_rate_rad_s
+        vision.load_vision_config(overrides=["mep.motion_mode=six_dof", "mep.angular_velocity_rad_s=[0.3, 0.0, 0.0]"])
+
+
+def test_config_six_dof():
+    c = vision.load_vision_config(overrides=["mep.motion_mode=six_dof", "mep.angular_velocity_rad_s=[0.01, -0.02, 0.03]"])
+    assert c.mep.six_dof
+    assert np.allclose(c.mep.angular_velocity_w(), [0.01, -0.02, 0.03])
+    assert np.allclose(c.mep.linear_velocity_w(), np.asarray(c.mep.drift_direction) * c.mep.linear_velocity_mps)
+    t = vision.load_vision_config(overrides=["mep.angular_velocity_rad_s=[0.01, -0.02, 0.03]"])
+    assert not t.mep.six_dof and np.array_equal(t.mep.angular_velocity_w(), np.zeros(3))
 
 
 def test_intrinsics_match_fov(cfg, k):
@@ -178,3 +195,188 @@ def test_orientation_window_mean():
     err = vision.pose_errors(Frame(np.zeros(3), r0), est)[1]
     assert np.allclose(est.rot.T @ est.rot, np.eye(3), atol=1e-9) and np.linalg.det(est.rot) > 0
     assert err < 0.4 < worst, (err, worst)
+
+
+#############
+### 6-DoF ###
+#############
+
+
+def _rigid_motion(t, com0, v, w_w, r0, com_in_body):
+    """Exact torque-free motion with constant world-frame w: the body frame M at time t."""
+    r = vision.so3_exp(np.asarray(w_w) * t) @ r0
+    com = com0 + np.asarray(v) * t
+    return Frame(com - r @ com_in_body, r)
+
+
+def test_so3_exp_log_and_body_world_equivalence():
+    rng = np.random.default_rng(7)
+    for _ in range(20):
+        w = rng.normal(0.0, 1.0, 3)
+        assert np.allclose(vision.so3_log(vision.so3_exp(w * 0.5)), w * 0.5, atol=1e-9)
+        r = vision.so3_exp(rng.normal(0.0, 1.0, 3))
+        h = 0.3
+        # R Exp([R^T w] h) == Exp([w] h) R  (body-frame form used by the predictor)
+        assert np.allclose(r @ vision.so3_exp((r.T @ w) * h), vision.so3_exp(w * h) @ r, atol=1e-12)
+
+
+def test_euler_accumulation_is_not_used():
+    """Combined rotation: the SO(3) integral differs from adding roll/pitch/yaw rates."""
+    w = np.array([0.5, -0.4, 0.6])  # rad/s, world
+    r0 = _rot([0.2, 1.0, -0.3], 50.0)
+    h = 1.0
+    exact = vision.so3_exp(w * h) @ r0
+    p = vision.ConstantTwistPredictor(vision.PredictionCfg(horizon_sec=h, velocity_window_sec=2.0, orientation_window_sec=2.0,
+                                                           min_samples=10, max_plausible_angular_rate_rad_s=2.0), Frame.identity())
+    for i in range(21):
+        t = 0.1 * i
+        p.add(vision.Estimate(t, Frame(np.zeros(3), vision.so3_exp(w * t) @ r0)))
+    pred = p.predict(0.0, horizon=h)  # from t = 0 to t = 1
+    assert np.allclose(p.angular_velocity(), w, atol=1e-6)
+    assert math.degrees(frames.rotation_angle(pred.rot, exact)) < 1e-4
+    rpy0 = np.radians(vision.rotmat_to_rpy_deg(r0))
+    rpy1 = np.radians(vision.rotmat_to_rpy_deg(vision.so3_exp(w * 0.1) @ r0))
+    euler = rpy0 + (rpy1 - rpy0) / 0.1 * h
+    r_euler = _rot([0, 0, 1], math.degrees(euler[2])) @ _rot([0, 1, 0], math.degrees(euler[1])) @ _rot([1, 0, 0], math.degrees(euler[0]))
+    assert math.degrees(frames.rotation_angle(r_euler, exact)) > 1.0
+
+
+@pytest.mark.parametrize("reference", ["tag", "mep_com"])
+@pytest.mark.parametrize("noise", [False, True])
+def test_constant_twist_prediction_offset_point(noise, reference):
+    """Cylinder_01 far from the centre of mass moves on an arc: the SE(3) prediction
+    (reference frame + fixed T_ref_Y) follows it, the translation-only one does not.
+
+    reference "mep_com": exact (the COM moves in a straight line). reference "tag": the
+    tags orbit the COM, the constant-velocity fit is biased by about
+    a (T^2/12 + T h/2 + h^2/2), a = |w|^2 r (documented model limit)."""
+    rng = np.random.default_rng(11)
+    v = np.array([0.0, -0.008, 0.006])
+    w = np.array([0.05, -0.04, 0.06])  # 5 deg/s: large, to make the arc visible
+    r0 = _rot([0.3, -0.2, 1.0], 40.0)
+    com0 = np.array([5.0, -2.7, 3.1])
+    com_in_body = np.array([0.1, -0.2, 0.05])
+    t_m_t = Frame(np.array([0.0, 0.0, 1.8]), _rot([1, 0, 0], 15.0))  # tags 1.8 m from the body origin
+    t_t_y = Frame(np.array([0.0, 0.0, -0.045]), np.eye(3))
+    cfg = vision.PredictionCfg(horizon_sec=0.3, velocity_window_sec=2.0, orientation_window_sec=5.0, min_samples=10)
+    # same construction as VisionCaptureDemo
+    t_ref_y = Frame(com_in_body, np.eye(3)).inv() @ t_m_t @ t_t_y if reference == "mep_com" else t_t_y
+    six = vision.ConstantTwistPredictor(cfg, t_ref_y)
+    lin = vision.LinearDriftPredictor(cfg)
+    t_now = 6.0
+    for i in range(int(t_now / 0.1) + 1):
+        t = 0.1 * i
+        y = _rigid_motion(t, com0, v, w, r0, com_in_body) @ t_m_t @ t_t_y
+        if noise:  # PnP-like noise: 0.5 mm, 0.1 deg
+            y = Frame(y.pos + rng.normal(0.0, 5e-4, 3), y.rot @ vision.so3_exp(np.radians(rng.normal(0.0, 0.1, 3))))
+        six.add(vision.Estimate(t, y))
+        lin.add(vision.Estimate(t, y))
+    h, big_t = cfg.horizon_sec, cfg.velocity_window_sec
+    truth_now = _rigid_motion(t_now, com0, v, w, r0, com_in_body) @ t_m_t @ t_t_y
+    truth = _rigid_motion(t_now + h, com0, v, w, r0, com_in_body) @ t_m_t @ t_t_y
+    assert np.linalg.norm(six.angular_velocity() - w) < (2e-3 if noise else 1e-6)
+    pred = six.predict(t_now)
+    pe, ae = vision.pose_errors(truth, pred)
+    r_tag = float(np.linalg.norm((t_m_t.pos - com_in_body) - np.dot(t_m_t.pos - com_in_body, w) * w / np.dot(w, w)))
+    bias = np.dot(w, w) * r_tag * (big_t ** 2 / 12 + big_t * h / 2 + h ** 2 / 2) if reference == "tag" else 0.0
+    tol_p = 1.3 * bias + (2e-3 if noise else 1e-6)
+    tol_a = 0.1 if noise else 1e-4
+    assert pe < tol_p and ae < tol_a, (pe, ae, bias)
+    if reference == "tag" and not noise:
+        assert pe > 0.5 * bias  # the bias is real, not an artefact of the test
+    assert vision.pose_errors(truth_now, six.estimate(t_now))[0] < tol_p
+    # rigid velocity field: velocity of Cylinder_01 = numerical derivative of the truth
+    dt = 1e-4
+    v_y = ((_rigid_motion(t_now + dt, com0, v, w, r0, com_in_body) @ t_m_t @ t_t_y).pos - truth_now.pos) / dt
+    v_tol = (np.dot(w, w) * r_tag * big_t if reference == "tag" else 0.0) + (3e-3 if noise else 1e-5)
+    assert np.linalg.norm(six.velocity_at(truth_now.pos, t_now) - v_y) < v_tol
+    # the translation-only predictor keeps the orientation fixed: its error is the
+    # rotation over (window mean -> t + h), far above the 6-DoF prediction
+    assert vision.pose_errors(truth, lin.predict(t_now))[1] > 5.0 * max(ae, 0.02)
+
+
+def test_tag_reference_bias_small_at_configured_rate(cfg):
+    """The configured six_dof rate (|w| ~ 0.5 deg/s) with the tags 2 m from the COM: the
+    `tag` reference bias stays far below the capture tolerances (< 0.2 mm)."""
+    w = np.asarray(vision.load_vision_config(overrides=["mep.motion_mode=six_dof"]).mep.angular_velocity_w())
+    com_in_body = np.zeros(3)
+    t_m_t = Frame(np.array([0.0, 2.0, 0.0]), _rot([1, 0, 0], -90.0))
+    t_t_y = Frame(np.array([0.0, 0.0, -0.045]), np.eye(3))
+    pcfg = cfg.prediction
+    p = vision.ConstantTwistPredictor(pcfg, t_t_y)
+    t_now = 8.0
+    motion = lambda t: _rigid_motion(t, np.array([5.0, -2.7, 3.1]), cfg.mep.linear_velocity_w(), w, np.eye(3), com_in_body) @ t_m_t @ t_t_y
+    for i in range(int(t_now / 0.1) + 1):
+        p.add(vision.Estimate(0.1 * i, motion(0.1 * i)))
+    pe, ae = vision.pose_errors(motion(t_now + pcfg.horizon_sec), p.predict(t_now))
+    assert pe < 2e-4 and ae < 1e-4, (pe, ae)
+
+
+def test_constant_twist_rejects_implausible_rate():
+    cfg = vision.PredictionCfg(min_samples=5, max_plausible_angular_rate_rad_s=0.1)
+    p = vision.ConstantTwistPredictor(cfg, Frame.identity())
+    for i in range(10):
+        p.add(vision.Estimate(0.1 * i, Frame(np.zeros(3), vision.so3_exp(np.array([0.0, 0.0, 0.5 * 0.1 * i])))))
+    assert p.angular_velocity() is None and p.velocity() is None and p.predict(0.9) is None
+    assert p.twist() == (None, None)
+    assert p.estimate(0.9) is not None  # falls back to the latest measurement
+
+
+def test_linear_predictor_interface_unchanged():
+    """translation_only keeps the Phase 1 numbers through the shared interface."""
+    p = vision.LinearDriftPredictor(vision.PredictionCfg(min_samples=10))
+    r0 = _rot([0.2, 1.0, -0.3], 70.0)
+    for i in range(20):
+        p.add(vision.Estimate(0.1 * i, Frame(np.array([1.0, 2.0, 3.0]) + 0.01 * i, r0)))
+    assert np.array_equal(p.orientation_at(123.0), p.orientation())
+    assert np.array_equal(p.velocity_at(np.array([9.0, 9.0, 9.0]), 1.9), p.velocity())
+    v, w = p.twist()
+    assert np.array_equal(v, p.velocity()) and w is None
+
+
+def test_six_dof_vision_pipeline(cfg, k):
+    """Synthetic end-to-end: rotating + drifting constellation -> projected corners ->
+    16-point PnP -> T_W_Y -> constant-twist prediction."""
+    rng = np.random.default_rng(5)
+    cam_w = Frame(np.zeros(3), np.eye(3))  # camera at the world origin
+    v = np.array([0.004, -0.008, 0.006])
+    w = np.array([0.005, -0.004, 0.006])  # config default, rad/s
+    r0 = _rot([1, 0, 0], 180.0)  # constellation faces the camera
+    com0 = np.array([0.02, -0.01, 1.0])
+    com_in_body = np.array([0.0, 0.0, -0.8])  # rotation centre 0.8 m behind the tags
+    t_t_y = Frame(np.array([0.0, 0.0, -0.045]), np.eye(3))
+    pcfg = vision.PredictionCfg(horizon_sec=0.3, velocity_window_sec=2.0, orientation_window_sec=5.0, min_samples=10)
+    pred = vision.ConstantTwistPredictor(pcfg, t_t_y)
+    t_end = 8.0
+    for i in range(int(t_end / 0.1) + 1):
+        t = 0.1 * i
+        t_w_t = _rigid_motion(t, com0, v, w, r0, com_in_body)
+        pose = vision.estimate_constellation_pose(_synthetic(cfg, k, cam_w.inv() @ t_w_t, noise_px=0.1, seed=int(rng.integers(1 << 30))), cfg.apriltag, k)
+        assert pose is not None
+        pred.add(vision.Estimate(t, cam_w @ pose.t_c_t @ t_t_y))
+    truth = _rigid_motion(t_end + 0.3, com0, v, w, r0, com_in_body) @ t_t_y
+    pe, ae = vision.pose_errors(truth, pred.predict(t_end))
+    assert np.linalg.norm(pred.angular_velocity() - w) < 2e-3, pred.angular_velocity()
+    assert pe < 3e-3 and ae < 0.3, (pe, ae)
+
+
+@pytest.mark.parametrize("mode", ["translation_only", "six_dof"])
+def test_rendezvous_start_pose(mode):
+    """Cylinder_01 starts at nominal - v t_r; translation_only is exactly the Phase 1 pose;
+    rotating about Cylinder_01 for t_r with w brings the MEP back to the nominal pose."""
+    c = vision.load_vision_config(overrides=[f"mep.motion_mode={mode}"])
+    v, w, t_r = c.mep.linear_velocity_w(), c.mep.angular_velocity_w(), c.mep.rendezvous_time_s
+    nominal = Frame(np.array([-0.80, 11.41, 8.41]), frames.quat_wxyz_to_rotmat((0.095277, -0.700659, 0.095277, -0.700659)))
+    t_m_y = Frame(np.array([0.3, -1.2, 0.9]), _rot([1, 0, 0], 30.0))
+    start = vision.rendezvous_start_pose(nominal, t_m_y, v, w, t_r)
+    y_nom = (nominal @ t_m_y).pos
+    assert np.abs((start @ t_m_y).pos - (y_nom - v * t_r)).max() < 1e-12
+    if mode == "translation_only":
+        assert np.array_equal(start.pos, nominal.pos - v * t_r) and np.array_equal(start.rot, nominal.rot)
+    else:
+        assert math.degrees(frames.rotation_angle(start.rot, nominal.rot)) == pytest.approx(math.degrees(np.linalg.norm(w) * t_r), rel=1e-9)
+        # forward: drift the pivot, turn about it -> nominal
+        q = vision.so3_exp(w * t_r)
+        y_end = (start @ t_m_y).pos + v * t_r
+        end = Frame(y_end + q @ (start.pos - (start @ t_m_y).pos), q @ start.rot)
+        assert vision.pose_errors(nominal, end)[0] < 1e-12 and vision.pose_errors(nominal, end)[1] < 1e-5  # acos floor

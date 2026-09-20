@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MRV Phase 1: AprilTag vision capture of a linearly drifting 3 t MEP.
+"""MRV: AprilTag vision capture of a free-floating 3 t MEP (linear drift or 6-DoF).
 
 Must run with the Isaac Sim Python (the same interpreter `srb` uses):
 
@@ -8,6 +8,8 @@ Must run with the Isaac Sim Python (the same interpreter `srb` uses):
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario static --headless
     # Test 2 + 3 -- linear drift intercept, capture, 10 s holding, slow retreat
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless
+    # 6-DoF -- XYZ drift + combined roll/pitch/yaw rate (mep.angular_velocity_rad_s)
+    ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless --tag six_dof --set mep.motion_mode=six_dof
     # GUI (debug draw + camera overlay images); after a success the simulation keeps
     # running with the MEP held until the window is closed (--exit_when_done to quit)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic
@@ -86,8 +88,9 @@ def main():
 
     sets = list(args.sets)
     if args.scenario == "static":
-        # Test 1: the MEP is at rest
+        # Test 1: the MEP is at rest (no drift, no rotation)
         sets.append("mep.linear_velocity_mps=0.0")
+        sets.append("mep.motion_mode=translation_only")
     out_dir = Path(args.out_dir) if args.out_dir else default_out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     state = {"ok": False}

@@ -36,8 +36,8 @@ PYTHON = os.environ.get("ISAAC_PYTHON", os.path.expanduser("~/isaac-sim/python.s
 # required 0.01 - 0.02 m/s drift range
 RUNS = [
     ("static", "static", []),
-    ("dynamic", "dynamic", ["--set", "mep.linear_velocity_mps=0.01"]),
-    ("dynamic_v002", "dynamic", ["--set", "mep.linear_velocity_mps=0.02"]),
+    ("dynamic", "dynamic", ["--set", "mep.motion_mode=translation_only", "--set", "mep.linear_velocity_mps=0.01"]),
+    ("dynamic_v002", "dynamic", ["--set", "mep.motion_mode=translation_only", "--set", "mep.linear_velocity_mps=0.02"]),
 ]
 
 

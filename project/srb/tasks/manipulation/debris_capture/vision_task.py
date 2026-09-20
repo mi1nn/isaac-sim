@@ -6,7 +6,8 @@ Adds to `DockingTask` (whose measured MEP placement, EE contact frame and magnet
 - 4 AprilTags on the MEP attachment face, centred on `gripper_fixture/Cylinder_01`
   (the ground-truth docking point, left untouched)
 - `cam_wrist`: an RGB pinhole camera on the Canadarm3 last link, on the EE axis
-- the 3 t MEP drifting linearly (no rotation) through its nominal capture pose
+- the 3 t MEP drifting through its nominal capture pose: linearly (`mep.motion_mode:
+  translation_only`) or with a combined roll/pitch/yaw rate as well (`six_dof`)
 
 The translucent capture cylinder of `CaptureManager` stays visible, sized to the
 Canadarm3 flange (`capture.cylinder_radius_m`), and the MEP marker `Cylinder_01` is
@@ -32,6 +33,7 @@ from .vision import (
     VisionCaptureConfig,
     check_constellation_layout,
     load_vision_config,
+    rendezvous_start_pose,
     spawn_tag_constellation,
 )
 
@@ -53,10 +55,9 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
         """(Re)apply the YAML values that live in the env config (call after overrides)."""
         v = self.load_vision()
         self.scene.debris.spawn.mass_props.mass = float(v.mep.mass_kg)
-        self.scene.debris.init_state.lin_vel = tuple(
-            (np.asarray(v.mep.drift_direction) * v.mep.linear_velocity_mps).tolist()
-        )
-        self.scene.debris.init_state.ang_vel = (0.0, 0.0, 0.0)
+        self.scene.debris.init_state.lin_vel = tuple(v.mep.linear_velocity_w().tolist())
+        # World frame [rad/s]; zero in translation_only
+        self.scene.debris.init_state.ang_vel = tuple(v.mep.angular_velocity_w().tolist())
         # Capture cylinder (visual, collider, contact face) and the MEP marker
         # Cylinder_01 share one radius; the marker keeps its pose and height
         r = float(v.capture.cylinder_radius_m)
@@ -146,18 +147,27 @@ class VisionCaptureTask(DockingTask):
             UsdShade.MaterialBindingAPI.Apply(smooth.GetPrim()).Bind(material)
         self.ee_cylinder_radius = geo.ee_contact_radius
 
-        ## Linear drift: start upstream of the nominal pose, pass through it at
-        ## `rendezvous_time_s`. Zero angular velocity (Phase 1).
+        ## Drift: start upstream of the nominal pose, pass through it at
+        ## `rendezvous_time_s`. translation_only: zero angular velocity (Phase 1).
+        ## six_dof: constant world-frame w, R(t) = Exp([w] t) R(0), so the start
+        ## orientation is Q R_nominal with Q = Exp(-[w] t_r), rotated about Cylinder_01:
+        ## at t = 0 the wrist camera (at the observation pose planned from the nominal
+        ## pose) sees the tags only drifted and turned in place, as in Phase 1. PhysX
+        ## rotates the body about its centre of mass (unknown before the simulation
+        ## starts), so Cylinder_01 passes the nominal pose at t_r only approximately:
+        ## miss ~ |w| t_r |COM -> Cylinder_01| (NEEDS_ISAAC_VALIDATION; the COM offset is
+        ## logged at start). With w = 0, Q = I and this is exactly the Phase 1 pose.
         _, mep_nominal, _ = geo.placement()
         self.mep_nominal = mep_nominal
-        drift = np.asarray(v.mep.drift_direction) * v.mep.linear_velocity_mps
-        mep_start = Frame(mep_nominal.pos - drift * v.mep.rendezvous_time_s, mep_nominal.rot)
+        drift = v.mep.linear_velocity_w()
+        omega = v.mep.angular_velocity_w()
+        mep_start = rendezvous_start_pose(mep_nominal, self.t_m_y, drift, omega, v.mep.rendezvous_time_s)
         set_prim_pose(stage, mep_path, mep_start)
         for cfg in (self.cfg.scene.debris, self.scene["debris"].cfg):
             cfg.init_state.pos = tuple(mep_start.pos.tolist())
             cfg.init_state.rot = mep_start.quat
             cfg.init_state.lin_vel = tuple(drift.tolist())
-            cfg.init_state.ang_vel = (0.0, 0.0, 0.0)
+            cfg.init_state.ang_vel = tuple(omega.tolist())
 
 
 def spawn_smooth_cylinder(stage, path: str, radius: float, length: float, segments: int = 128, parent_scale: float = 1.0):

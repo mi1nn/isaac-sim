@@ -1,4 +1,5 @@
-"""AprilTag constellation -> Cylinder_01 pose estimation and linear-drift prediction.
+"""AprilTag constellation -> Cylinder_01 pose estimation and motion prediction
+(`LinearDriftPredictor`: translation only, `ConstantTwistPredictor`: 6-DoF).
 
 Pure numpy / OpenCV (plus a few USD helpers for spawning the tags), so the vision
 math can be tested without Isaac Sim (`project/tests/test_vision_math.py`).
@@ -17,6 +18,9 @@ Frames (all rigid, right-handed, rotation matrices have the axes as columns):
 
 Estimation chain:  image -> (PnP) T_C_T -> T_W_T = T_W_L @ T_L_C @ T_C_T
                    -> T_W_Y = T_W_T @ T_T_Y   (T_T_Y is a fixed, design-time transform)
+
+Conventions: quaternions are (w, x, y, z) as in Isaac Lab / USD Gf.Quat; `A @ B` of
+`Frame`s is T_A_B composition (child on the right); angular velocities are rad/s.
 """
 
 import copy
@@ -34,13 +38,39 @@ from .frames import Frame, rotation_angle
 ##############
 
 
+MOTION_MODES = ("translation_only", "six_dof")
+# six_dof prediction reference: the tag constellation T (vision + the design-time
+# T_T_Y only) or the MEP centre of mass (moves in a straight line in free flight)
+REFERENCE_FRAMES = ("tag", "mep_com")
+
+
 @dataclass
 class MepVisionCfg:
     mass_kg: float = 3000.0
+    # "translation_only" (Phase 1: no rotation, angular_velocity_rad_s is not applied)
+    # or "six_dof" (XYZ drift + combined roll/pitch/yaw rate)
+    motion_mode: str = "translation_only"
+    # Linear velocity [m/s] (world) = drift_direction (unit) * linear_velocity_mps
     linear_velocity_mps: float = 0.01
     drift_direction: List[float] = field(default_factory=lambda: [0.0, -0.8, 0.6])
-    angular_velocity_deg_s: float = 0.0
+    # six_dof only: [wx, wy, wz] [rad/s] in the WORLD frame (Isaac Lab
+    # `RigidObjectCfg.InitialStateCfg.ang_vel` / `root_com_ang_vel_w` convention)
+    angular_velocity_rad_s: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     rendezvous_time_s: float = 15.0
+
+    @property
+    def six_dof(self) -> bool:
+        return self.motion_mode == "six_dof"
+
+    def linear_velocity_w(self) -> np.ndarray:
+        """Initial MEP (centre of mass) linear velocity [m/s], world frame."""
+        return np.asarray(self.drift_direction, dtype=float) * float(self.linear_velocity_mps)
+
+    def angular_velocity_w(self) -> np.ndarray:
+        """Initial MEP angular velocity [rad/s], world frame (zero in translation_only)."""
+        if not self.six_dof:
+            return np.zeros(3)
+        return np.asarray(self.angular_velocity_rad_s, dtype=float).reshape(3)
 
 
 @dataclass
@@ -93,6 +123,10 @@ class PredictionCfg:
     orientation_window_sec: float = 5.0
     min_samples: int = 10
     max_plausible_speed_mps: float = 0.2
+    # six_dof: an estimated angular rate above this is rejected as a bad estimate [rad/s]
+    max_plausible_angular_rate_rad_s: float = 0.2
+    # six_dof: frame whose origin is fitted with constant velocity ("tag" | "mep_com")
+    reference_frame: str = "tag"
 
 
 @dataclass
@@ -121,6 +155,8 @@ class CaptureVisionCfg:
     max_distance_m: float = 0.15
     max_angle_deg: float = 5.0
     max_relative_velocity_mps: float = 0.05
+    # six_dof only: |w_EE - w_MEP| [rad/s] (not checked in translation_only)
+    max_relative_angular_velocity_rad_s: float = 0.01
     max_lateral_m: float = 0.02
     # Radius of the (translucent) EE capture cylinder, sized to the Canadarm3 flange.
     # The MEP marker Cylinder_01 is scaled to the same radius (position, orientation
@@ -150,6 +186,8 @@ class LoggingVisionCfg:
     dir: str = "logs/vision_capture"
     csv: str = "logs/vision_capture_metrics.csv"
     rate_hz: float = 10.0
+    # false: no per-run metrics CSV is written (rows are still kept for the result checks)
+    csv_enabled: bool = True
     overlay_every_sec: float = 1.0
     debug_draw: bool = True
 
@@ -210,8 +248,17 @@ def load_vision_config(path: Optional[str | Path] = None, overrides: Sequence[st
     if np.linalg.norm(d) < 1e-9:
         raise ValueError("mep.drift_direction must be non-zero")
     cfg.mep.drift_direction = (d / np.linalg.norm(d)).tolist()
-    if abs(cfg.mep.angular_velocity_deg_s) > 0.0:
-        raise ValueError("Phase 1 is linear drift only: mep.angular_velocity_deg_s must be 0")
+    if cfg.mep.motion_mode not in MOTION_MODES:
+        raise ValueError(f"mep.motion_mode must be one of {MOTION_MODES}, got '{cfg.mep.motion_mode}'")
+    w = np.asarray(cfg.mep.angular_velocity_rad_s, dtype=float)
+    if w.shape != (3,) or not np.isfinite(w).all():
+        raise ValueError(f"mep.angular_velocity_rad_s must be 3 finite values [rad/s], got {cfg.mep.angular_velocity_rad_s}")
+    cfg.mep.angular_velocity_rad_s = w.tolist()
+    if cfg.prediction.reference_frame not in REFERENCE_FRAMES:
+        raise ValueError(f"prediction.reference_frame must be one of {REFERENCE_FRAMES}, got '{cfg.prediction.reference_frame}'")
+    if cfg.mep.six_dof and np.linalg.norm(w) >= cfg.prediction.max_plausible_angular_rate_rad_s:
+        raise ValueError("mep.angular_velocity_rad_s exceeds prediction.max_plausible_angular_rate_rad_s "
+                         "(the estimate would always be rejected)")
     if cfg.apriltag.min_tags_for_pose < 2:
         raise ValueError("apriltag.min_tags_for_pose must be >= 2 (constellation PnP)")
     if len(set(cfg.apriltag.ids)) != 4:
@@ -673,3 +720,201 @@ class LinearDriftPredictor:
         if p is None or self.latest is None:
             return None
         return Frame(p, self.orientation())
+
+    ## Same interface as `ConstantTwistPredictor` (Phase 1 behaviour unchanged)
+    def orientation_at(self, t: float) -> Optional[np.ndarray]:
+        return self.orientation()
+
+    def velocity_at(self, p_w, t: float) -> Optional[np.ndarray]:
+        """Velocity of a point rigidly attached to the MEP: no rotation model -> v."""
+        return self.velocity()
+
+    def twist(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """(v [m/s], w [rad/s]) used by the controller; no rotation model -> w = None."""
+        return self.velocity(), None
+
+
+def so3_exp(w) -> np.ndarray:
+    """Exp([w]x): rotation matrix of the rotation vector w [rad]."""
+    return rotmat_from_rotvec(w)
+
+
+def so3_log(r: np.ndarray) -> np.ndarray:
+    """Log of a rotation matrix as a rotation vector [rad] (|result| <= pi)."""
+    return rotvec_from_rotmat(r)
+
+
+def rendezvous_start_pose(mep_nominal: Frame, t_m_y: Frame, v_w, w_w, t_r: float) -> Frame:
+    """MEP start pose so that it drifts (v_w) and turns (world-frame w_w) into
+    `mep_nominal` after `t_r` seconds, with the back-rotation Q = Exp(-[w] t_r) taken
+    about Cylinder_01 (`t_m_y`): Cylinder_01 starts exactly at nominal - v t_r.
+    With w = 0 this is exactly the Phase 1 pose (nominal - v t_r, nominal rotation)."""
+    q = so3_exp(-np.asarray(w_w, dtype=float) * t_r)
+    pivot = (mep_nominal @ t_m_y).pos
+    pos = mep_nominal.pos + (q - np.eye(3)) @ (mep_nominal.pos - pivot) - np.asarray(v_w, dtype=float) * t_r
+    return Frame(pos, q @ mep_nominal.rot)
+
+
+class ConstantTwistPredictor:
+    """6-DoF constant linear + angular velocity model (no learning).
+
+    Everything is fitted on the pose of a *reference frame* rigidly attached to the MEP
+    (the tag constellation T, i.e. what the PnP measures, or the MEP centre of mass) and
+    mapped to Cylinder_01 with the fixed transform T_ref_Y, so a Cylinder_01 offset from
+    the rotation centre moves on the correct arc:
+
+        T_W_ref(t) = (p(t), R(t))              fitted over the recent estimates
+        p(t + h)   = p(t) + v * h
+        R(t + h)   = R(t) @ Exp([w_B] h),   w_B = R(t)^T w_W   (= Exp([w_W] h) @ R(t))
+        T_W_Y(t + h) = T_W_ref(t + h) @ T_ref_Y
+
+    Estimation (noise-robust forms of (p_t - p_{t-dt}) / dt and Log(R_{t-dt}^T R_t) / dt):
+    - v: least-squares slope of the reference origin over `velocity_window_sec`
+    - w: least-squares slope of phi_i = Log(R_i @ R_bar^T) over `orientation_window_sec`,
+      where R_bar is the chordal mean of the window, so every phi_i is small. phi is a
+      rotation vector of a *left* (world-frame) perturbation, so its slope is the angular
+      velocity in the WORLD frame (the frame of Isaac Lab `root_com_ang_vel_w`).
+      R(t) = Exp([w_W] (t - t0)) @ Exp([phi0]) @ R_bar.
+
+    Model limits: constant w_W is exact for a spin about a principal axis; a torque-free
+    tumble about a non-principal axis precesses (w_W slowly changes) -- the sliding window
+    tracks that. In free flight only the centre of mass moves in a straight line; any other
+    reference origin at distance r from it accelerates centripetally (a = |w|^2 r), which
+    the constant-velocity fit misses by about a * (T^2/12 + T h/2 + h^2/2) with the
+    velocity window T (0.1 mm for |w| = 0.5 deg/s, r = 2 m, T = 2 s, h = 0.3 s; 7 mm for
+    |w| = 5 deg/s, r = 1.8 m). `prediction.reference_frame: mep_com` removes this bias.
+    """
+
+    def __init__(self, cfg: PredictionCfg, t_ref_y: Frame):
+        self.cfg = cfg
+        self.t_ref_y = t_ref_y
+        self._t_y_ref = t_ref_y.inv()
+        self.history: List[Estimate] = []  # velocity window (Cylinder_01 estimates, as received)
+        self._rot_history: List[Estimate] = []  # orientation / angular-velocity window
+        self._cache: Dict[str, object] = {}
+
+    def reset(self):
+        self.history.clear()
+        self._rot_history.clear()
+        self._cache.clear()
+
+    def add(self, est: Estimate):
+        self.history.append(est)
+        self.history = [e for e in self.history if e.t >= est.t - self.cfg.velocity_window_sec]
+        self._rot_history.append(est)
+        self._rot_history = [e for e in self._rot_history if e.t >= est.t - self.cfg.orientation_window_sec]
+        self._cache.clear()
+
+    @property
+    def latest(self) -> Optional[Estimate]:
+        return self.history[-1] if self.history else None
+
+    def _ref(self, e: Estimate) -> Frame:
+        return e.t_w_y @ self._t_y_ref
+
+    ## Fits (cached until the next estimate arrives)
+    def _fit_position(self) -> Optional[Tuple[float, np.ndarray, np.ndarray]]:
+        if "pos" not in self._cache:
+            fit = None
+            if len(self.history) >= self.cfg.min_samples:
+                t = np.array([e.t for e in self.history])
+                p = np.array([self._ref(e).pos for e in self.history])
+                t0 = float(t.mean())
+                a = np.column_stack((np.ones_like(t), t - t0))
+                coef, *_ = np.linalg.lstsq(a, p, rcond=None)
+                fit = (t0, coef[0], coef[1])
+            self._cache["pos"] = fit
+        return self._cache["pos"]  # type: ignore
+
+    def _fit_rotation(self) -> Optional[Tuple[float, np.ndarray, np.ndarray]]:
+        """(t0, R(t0), w_W) of the reference frame, or None."""
+        if "rot" not in self._cache:
+            fit = None
+            hist = self._rot_history
+            if len(hist) >= self.cfg.min_samples:
+                rots = [self._ref(e).rot for e in hist]
+                u, _, vt = np.linalg.svd(np.sum(rots, axis=0))
+                r_bar = u @ np.diag([1.0, 1.0, np.sign(np.linalg.det(u @ vt))]) @ vt
+                t = np.array([e.t for e in hist])
+                phi = np.array([so3_log(r @ r_bar.T) for r in rots])
+                t0 = float(t.mean())
+                a = np.column_stack((np.ones_like(t), t - t0))
+                coef, *_ = np.linalg.lstsq(a, phi, rcond=None)
+                fit = (t0, so3_exp(coef[0]) @ r_bar, coef[1])
+            self._cache["rot"] = fit
+        return self._cache["rot"]  # type: ignore
+
+    ## Twist
+    def velocity(self) -> Optional[np.ndarray]:
+        """Linear velocity [m/s] (world) of the reference origin; None unless the whole
+        twist (linear and angular) is available and plausible."""
+        fit = self._fit_position()
+        if fit is None or self.angular_velocity() is None:
+            return None
+        v = fit[2]
+        return v if np.linalg.norm(v) <= self.cfg.max_plausible_speed_mps else None
+
+    def angular_velocity(self) -> Optional[np.ndarray]:
+        """Angular velocity [rad/s] in the WORLD frame, or None (too few / implausible)."""
+        fit = self._fit_rotation()
+        if fit is None:
+            return None
+        w = fit[2]
+        return w if np.linalg.norm(w) <= self.cfg.max_plausible_angular_rate_rad_s else None
+
+    def twist(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        v = self.velocity()
+        return v, (self.angular_velocity() if v is not None else None)
+
+    ## Poses
+    def reference_at(self, t: float) -> Optional[Frame]:
+        """Fitted reference-frame pose at time t (None until the twist is available)."""
+        fp, fr = self._fit_position(), self._fit_rotation()
+        if fp is None or fr is None or self.velocity() is None:
+            return None
+        t0p, p0, v = fp
+        t0r, r0, w = fr
+        return Frame(p0 + v * (t - t0p), so3_exp(w * (t - t0r)) @ r0)
+
+    def orientation_at(self, t: float) -> Optional[np.ndarray]:
+        """Cylinder_01 orientation at time t (latest measurement until the fit exists)."""
+        ref = self.reference_at(t)
+        if ref is not None:
+            return ref.rot @ self.t_ref_y.rot
+        return None if self.latest is None else self.latest.t_w_y.rot.copy()
+
+    def orientation(self) -> Optional[np.ndarray]:
+        return None if self.latest is None else self.orientation_at(self.latest.t)
+
+    def estimate(self, t_now: float) -> Optional[Frame]:
+        """Filtered Cylinder_01 pose now (latest measurement until the fit exists)."""
+        if self.latest is None:
+            return None
+        ref = self.reference_at(t_now)
+        if ref is None:
+            y = self.latest.t_w_y
+            return Frame(y.pos.copy(), y.rot.copy())
+        return ref @ self.t_ref_y
+
+    def predict_reference(self, t_now: float, horizon: Optional[float] = None) -> Optional[Frame]:
+        """Reference frame at t_now + horizon: p + v h, R Exp([R^T w_W] h)."""
+        h = self.cfg.horizon_sec if horizon is None else horizon
+        cur = self.reference_at(t_now)
+        v, w = self.twist()
+        if cur is None or v is None or w is None:
+            return None
+        w_body = cur.rot.T @ w
+        return Frame(cur.pos + v * h, cur.rot @ so3_exp(w_body * h))
+
+    def predict(self, t_now: float, horizon: Optional[float] = None) -> Optional[Frame]:
+        """Cylinder_01 pose at t_now + horizon: T_W_ref(t + h) @ T_ref_Y."""
+        ref = self.predict_reference(t_now, horizon)
+        return None if ref is None else ref @ self.t_ref_y
+
+    def velocity_at(self, p_w, t: float) -> Optional[np.ndarray]:
+        """Velocity [m/s] of the MEP material point at `p_w` (world): v + w x (p - p_ref)."""
+        ref = self.reference_at(t)
+        v, w = self.twist()
+        if ref is None or v is None or w is None:
+            return None
+        return v + np.cross(w, np.asarray(p_w, dtype=float) - ref.pos)

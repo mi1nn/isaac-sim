@@ -19,8 +19,10 @@ _cache: dict = {}
 # run name -> (scenario, extra arguments); same runs as scripts/run_phase1_tests.py
 RUNS = {
     "static": ("static", []),
-    "dynamic": ("dynamic", ["--set", "mep.linear_velocity_mps=0.01"]),
-    "dynamic_v002": ("dynamic", ["--set", "mep.linear_velocity_mps=0.02"]),
+    "dynamic": ("dynamic", ["--set", "mep.motion_mode=translation_only", "--set", "mep.linear_velocity_mps=0.01"]),
+    "dynamic_v002": ("dynamic", ["--set", "mep.motion_mode=translation_only", "--set", "mep.linear_velocity_mps=0.02"]),
+    # 6-DoF: XYZ drift + combined roll/pitch/yaw rate from the config (test_six_dof_capture.py)
+    "six_dof": ("dynamic", ["--set", "mep.motion_mode=six_dof"]),
 }
 DYNAMIC_RUNS = ["dynamic", "dynamic_v002"]
 
