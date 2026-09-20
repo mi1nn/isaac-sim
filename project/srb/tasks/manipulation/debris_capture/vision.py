@@ -159,10 +159,10 @@ class ApproachCfg:
     search_speed_mps: float = 0.25
     search_lag_m: float = 0.20
     search_max_joint_step_rad: float = 0.08
-    observe_distance_m: float = 0.7
-    approach_standoff_m: float = 0.6
+    observe_distance_m: float = 0.6
+    approach_standoff_m: float = 0.5
     final_gap_m: float = 0.05
-    speed_far_mps: float = 0.10
+    speed_far_mps: float = 0.11
     speed_near_mps: float = 0.04
     speed_capture_range_mps: float = 0.01
     near_distance_m: float = 0.30

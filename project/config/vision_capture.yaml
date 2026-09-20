@@ -118,8 +118,9 @@ approach:
   # rendezvous EE pose backed off `observe_distance_m` along the approach axis.
   # This is a configured search pose, not ground truth.
   start_at_observe_pose: true
-  # 0.7 m keeps each 60 mm tag at ~34 px with the 90 deg lens (36h11 decodes from ~30 px)
-  observe_distance_m: 0.7
+  # 0.7 m kept each 60 mm tag at ~34 px with the 90 deg lens (36h11 decodes from ~30 px).
+  # Now 0.6 m (-14 %, demo time; NEEDS_ISAAC_VALIDATION): the tags only get larger in the image.
+  observe_distance_m: 0.6
   # Start the arm swung about its base axis (azimuth) by this angle [deg]: the wrist camera
   # then does not see the MEP and SEARCH swings the arm back until the tags are seen.
   # 0: start at the observation pose. (`--start_yaw_deg 15` on the command line)
@@ -134,10 +135,13 @@ approach:
   search_lag_m: 0.20
   search_max_joint_step_rad: 0.08
   # Stage A/B: track the predicted target this far in front of the MEP face [m]
-  approach_standoff_m: 0.6
+  # (was 0.6; moved with observe_distance_m so the 0.1 m step between them is unchanged)
+  approach_standoff_m: 0.5
   # Final EE-contact-face to MEP-face gap at capture [m]
   final_gap_m: 0.05
-  speed_far_mps: 0.10
+  # was 0.10 (+10 %, demo time; NEEDS_ISAAC_VALIDATION). Only the far leg to the standoff;
+  # speed_near / speed_capture_range are unchanged
+  speed_far_mps: 0.11
   speed_near_mps: 0.04
   speed_capture_range_mps: 0.01
   near_distance_m: 0.30   # standoff below which `speed_near` applies
@@ -246,13 +250,18 @@ docking:
   settle_window_m: 0.008
 
   # Transport to the pre-dock pose (free space): the probe tip has to be swung about
-  # 5.5 m sideways onto the thruster axis, so this is the speed that sets the run time
+  # 4.8 m sideways (5.5 m before the dock_offset change) onto the thruster axis, so this
+  # is the speed that sets the run time
   # 0.10 m/s is the carry speed the existing GT docking demo used for the same payload;
   # 0.25 m/s left the 3 t payload swinging +-150 mm at the pre-dock pose
-  transport_speed_mps: 0.10
+  # Now 0.11 m/s (+10 %, demo time; NEEDS_ISAAC_VALIDATION: 0.10 is the verified value).
+  # The sideways distance is also shorter: the satellite is placed with
+  # dock_offset (0, 4.8, 0) m instead of (0, 5.5, 0) m (`vision_task.py`, VISION_DOCK_OFFSET_M)
+  transport_speed_mps: 0.11
 
   # Docking-axis approach: fast far away, controlled near, slow for the insertion
-  approach_speed_mps: 0.10
+  # (far leg only, was 0.10; near / insertion / align speeds are unchanged)
+  approach_speed_mps: 0.11
   slow_zone_m: 0.30
   near_speed_mps: 0.03
   insertion_zone_m: 0.10

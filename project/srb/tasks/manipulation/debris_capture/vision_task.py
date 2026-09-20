@@ -38,6 +38,14 @@ from .vision import (
 )
 
 
+# MEP translation from the grasp pose to the docked pose (`DockingPlacementCfg.dock_offset`),
+# i.e. the satellite is placed this far from the MEP. The GT docking demo keeps its
+# (0.0, 5.5, 0.0); the vision demo uses a shorter sideways carry (-0.7 m, -12.7 %) to cut the
+# transport time. Same +Y direction, so the docking axis and approach direction are unchanged.
+# NEEDS_ISAAC_VALIDATION: reachability of the shifted pre-dock / docked poses is not re-checked.
+VISION_DOCK_OFFSET_M: Tuple[float, float, float] = (0.0, 4.8, 0.0)
+
+
 @configclass
 class VisionCaptureTaskCfg(DockingTaskCfg):
     vision_config_path: str = DEFAULT_CONFIG_PATH.as_posix()
@@ -46,6 +54,7 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
 
     def __post_init__(self):
         super().__post_init__()
+        self.docking.placement.dock_offset = VISION_DOCK_OFFSET_M
         self.apply_vision_config()
 
     def load_vision(self) -> VisionCaptureConfig:

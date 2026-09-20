@@ -69,11 +69,11 @@ class DockingVisionCfg:
     settle_window_m: float = 0.008
 
     ## Transport to the pre-dock pose (free space, no insertion yet)
-    transport_speed_mps: float = 0.10
+    transport_speed_mps: float = 0.11
 
     ## Docking-axis approach
     # Above `slow_zone_m` remaining insertion distance, move at `approach_speed_mps`
-    approach_speed_mps: float = 0.10
+    approach_speed_mps: float = 0.11
     slow_zone_m: float = 0.30
     near_speed_mps: float = 0.03
     # Final insertion (inside the nozzle, below `insertion_zone_m` remaining)

@@ -178,6 +178,114 @@ e.pos = [e_x, e_y, e_z]     e_z < 0 → 아직 바깥
 
 ---
 
+## Demo Time Optimization
+
+### 작업 상태
+
+- Isaac Sim 실행: **미실행**
+- 실제 시뮬레이션 검증: **미실행**
+- 코드 및 설정 수정: **완료** (아래 값만 변경)
+- 설정 로드/순서 검증: `load_vision_config()` 가 새 값으로 오류 없이 로드됨 (Isaac 없이 확인). 이것은 시뮬레이션 검증이 아님
+
+### 변경 목표
+
+MEP 포획부터 도킹까지의 이동 거리를 줄이고, 불필요하게 느린 이동 속도를 소폭 증가시켜
+향후 시연 시간을 단축할 수 있도록 설정을 조정한다. 기존 로직은 수정하지 않았다.
+
+### MEP Position (로봇팔 ↔ MEP 상대 거리)
+
+MEP 와 팔의 관측 자세는 모두 `DockingPlacementCfg.grasp_pos` `(5.0, -2.75, 3.0)` 에서 파생된다
+(MEP 명목 자세 = 팔이 파지하는 자세, 팔 시작 자세 = 그 자세에서 `observe_distance_m` 만큼 후퇴).
+그래서 `grasp_pos` 를 옮기면 MEP 와 팔이 **같이** 움직여 상대 거리는 그대로이고, 검증된 도달성만 깨진다.
+상대 거리를 실제로 정하는 파라미터는 `approach.observe_distance_m` / `approach.approach_standoff_m` 이다.
+
+Before:
+- `approach.observe_distance_m` = 0.7 m (팔 시작 자세의 접촉면 ↔ MEP 면 간격)
+- `approach.approach_standoff_m` = 0.6 m (Stage A/B 추종 간격, 이 뒤부터 저속으로 좁힘)
+- MEP body 명목 pos (문서 실측값 인용) = (12.8046, -2.805, 4.8084) — 변경 없음
+- 팔 시작 자세 접촉면 X ≈ 5.0 − 0.7 = 4.3 (기하 계산, 미실측)
+
+After:
+- `approach.observe_distance_m` = 0.6 m
+- `approach.approach_standoff_m` = 0.5 m
+- MEP body 명목 pos = 변경 없음 (world 좌표계는 그대로)
+- 팔 시작 자세 접촉면 X ≈ 5.0 − 0.6 = 4.4 (기하 계산, 미실측)
+
+- 변경 방향: 팔 시작 자세 쪽에서 MEP 방향(접근축 world +X)으로 0.1 m, 즉 MEP 가 팔에 0.1 m 더 가까움
+- 변경량: observe −0.1 m (−14.3 %), standoff −0.1 m (−16.7 %). 두 값의 간격 0.1 m 는 그대로
+- 새 관측 자세와 접근 구간은 기존 접근 구간(0.7 → 0.05 m) 안에 포함됨
+- `mep.rendezvous_time_s`(15 s), `mep.linear_velocity_mps`(0.01 m/s), 드리프트 방향은 **변경 안 함**
+  (MEP 시작 상류 오프셋 0.15 m 는 접근축과 수직 방향이라 팔 쪽으로의 거리가 아님)
+- 태그 크기: 카메라–태그 거리가 약 1.09 m → 약 0.99 m 로 줄어 영상에서 태그가 커짐(계산상 ~34 px → ~37 px).
+  판독에는 유리한 방향이지만 실행으로 확인하지 않음
+
+파일: `project/config/vision_capture.yaml` (`approach:`), 동일 기본값 `project/srb/tasks/manipulation/debris_capture/vision.py` (`ApproachConfig`)
+
+### Satellite Position
+
+Before:
+- `DockingPlacementCfg.dock_offset` = (0.0, 5.5, 0.0) m
+- Satellite body(GOES_R) pos (문서 실측값 인용) = (23.9627, 2.3949, 3.1644)
+
+After:
+- `VISION_DOCK_OFFSET_M` = (0.0, 4.8, 0.0) m (`vision_task.py`, `VisionCaptureTaskCfg.__post_init__` 에서 적용)
+- Satellite body pos = (23.9627, 1.6949, 3.1644) — Y 만 −0.7 이동한 **계산값**, 미실측. 자세(quat) 는 그대로
+- 변경 방향: Probe(MEP) 쪽. MEP 가 +Y 로 이송되는 방향은 그대로이고, 위성 도킹 지점이 MEP 시작 쪽(−Y)으로 0.7 m 이동
+- 변경량: −0.7 m (−12.7 %)
+- 유지한 것: 도킹축(+X 접근), 노즐 방향, `pre_dock_distance_m`(1.0), `dock_depth`(0.8), 위성 자세, `roll_hint`
+- 위성 배치는 `probe_docked @ sat_dock⁻¹` 로 역산되므로 프로브 팁이 SAT_DOCK_POINT 에 동축으로 오는 관계는 유지됨
+  (오프셋만 평행이동)
+- 기하 추정: pre-dock 까지 프로브 팁 이송 거리 ≈ √(5.5² + 1.8²) = 5.79 m → √(4.8² + 1.8²) = 5.13 m (약 −11 %). 시간이 아님
+- 적용 범위: 비전 데모(`VisionCaptureTaskCfg`)에만 적용. GT 도킹 데모(`satellite_docking_demo.py`)의 `DockingPlacementCfg` 기본값
+  (0.0, 5.5, 0.0)은 그대로이며 `satellite_docking_demo.md` 의 "초기 배치" 표도 유효
+
+### Movement Speed
+
+| Parameter | Before | After | 변경률 | 구간 |
+|---|---|---|---|---|
+| `approach.speed_far_mps` | 0.10 m/s | 0.11 m/s | +10 % | 포획 far 접근 (관측 → standoff) |
+| `docking.transport_speed_mps` | 0.10 m/s | 0.11 m/s | +10 % | 도킹 pre-dock 자유공간 이송 |
+| `docking.approach_speed_mps` | 0.10 m/s | 0.11 m/s | +10 % | 도킹축 접근의 far 구간 (`slow_zone_m` 0.30 m 밖) |
+
+파일: `project/config/vision_capture.yaml`, 동일 기본값 `vision.py`(`speed_far_mps`), `probe_dock.py`(`transport_speed_mps`, `approach_speed_mps`)
+
+- `transport ≥ approach ≥ near ≥ insertion` 순서 제약은 유지됨 (0.11 / 0.11 / 0.03 / 0.01)
+- 위 "안정성을 위해 유지한 제한" 표의 **전송 속도 0.10 m/s 는 이번에 0.11 m/s 로 바뀜.**
+  0.10 이 실행으로 검증된 값이고 0.11 은 검증되지 않음. 0.25 m/s 에서 ±150 mm 진동이 남은 이력이 있어,
+  실행 시 pre-dock 도달 시점의 진동 크기를 가장 먼저 확인해야 함
+
+### 변경하지 않은 항목
+
+- 정밀 구간 속도: `speed_near_mps`(0.04), `speed_capture_range_mps`(0.01), `speed_ang_deg_s`, `near_speed_mps`(0.03),
+  `insertion_speed_mps`(0.01), `align_speed_mps`(0.008), `align_speed_deg_s`, `creep_speed_mps`
+- 진동 억제 관련: `accel_mps2`(0.005), `decel_gain_hz`(0.05), `swing_damping`, `settle_window_s/m`
+- `search_speed_mps` 등 SEARCH 파라미터 (기본 시작 자세에서는 사용되지 않고, 과거 더 공격적인 값이 IK 를 다른 해로 보낸 기록이 있음)
+- MEP Capture / Attachment / Compliance / Docking / AprilTag 로직, ROS 2 구조, State Machine, Robot control logic
+- Physics 설정, Collision 설정, MEP mass, simulation timestep
+- 게이트·타임아웃 값(`gate_*`, `align_*`, `dock_*`, `stage_timeout_s`, `phase_timeout_s`)
+- `grasp_pos`, `approach_dir`, `roll_hint`, `mep.rendezvous_time_s`, 드리프트 속도·방향
+
+### 이전 검증 결과의 적용 범위
+
+이 보고서의 `[RUNTIME_VALIDATED]` (20/20 checks PASS, 도킹 SUCCESS) 는 **변경 전 값(dock_offset 5.5 m, 속도 0.10 m/s)** 으로
+얻은 결과이다. 위 변경 후의 값으로는 다시 실행하지 않았으므로 같은 결과가 유지되는지는 알 수 없다.
+
+### 실행 검증
+
+현재 Isaac Sim 실행 환경이 없어 실제 실행 검증은 수행하지 않음.
+향후 Isaac Sim 실행 환경이 확보되면 다음 항목을 별도로 검증해야 함.
+
+- MEP Capture (관측 0.6 m / standoff 0.5 m 에서 태그 검출·PnP·예측이 유지되는지)
+- Attachment
+- Robot movement (특히 이동한 pre-dock / 도킹 자세 `(3.2, 2.05, 3.0)` 부근의 도달성·관절 한계. 비전 데모는 PLAN 도달성 검사를 하지 않음)
+- AprilTag tracking
+- Compliance
+- Docking (위성이 −Y 로 0.7 m 이동한 배치에서 MEP 시작 자세·팔과의 간섭 여부)
+- Physics stability (전송 0.11 m/s 에서 3 t 페이로드 진동)
+- 전체 시연 시간 (변경 전후 비교. 이번 변경이 시간을 줄이는지는 측정 전까지 알 수 없음)
+
+---
+
 ## [STATIC_CHECKED]
 
 - Python 문법 / import / 클래스·함수 참조
