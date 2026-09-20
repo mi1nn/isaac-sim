@@ -380,3 +380,36 @@ def test_rendezvous_start_pose(mode):
         y_end = (start @ t_m_y).pos + v * t_r
         end = Frame(y_end + q @ (start.pos - (start @ t_m_y).pos), q @ start.rot)
         assert vision.pose_errors(nominal, end)[0] < 1e-12 and vision.pose_errors(nominal, end)[1] < 1e-5  # acos floor
+
+
+def test_ros_config_defaults_and_overrides():
+    """The ROS 2 interface is off by default and configurable (`ros.*`); no rclpy needed."""
+    cfg = vision.load_vision_config()
+    assert cfg.ros.enabled is False and cfg.ros.namespace == "mrv" and cfg.ros.require_start_cmd is False
+    cfg = vision.load_vision_config(overrides=["ros.enabled=true", "ros.namespace=/robot1/", "ros.require_start_cmd=true"])
+    assert cfg.ros.enabled and cfg.ros.require_start_cmd and cfg.ros.namespace == "robot1"
+    with pytest.raises(ValueError):
+        vision.load_vision_config(overrides=["ros.publish_rate_hz=0"])
+
+
+def test_rotation_start_option():
+    assert vision.load_vision_config().mep.rotation_start == "converge"
+    assert vision.load_vision_config(overrides=["mep.rotation_start=diverge"]).mep.rotation_start == "diverge"
+    with pytest.raises(ValueError):
+        vision.load_vision_config(overrides=["mep.rotation_start=away"])
+    # diverge = rendezvous_start_pose with w = 0: nominal orientation, position nominal - v t_r
+    nominal = vision.Frame(np.array([1.0, 2.0, 3.0]), vision.so3_exp([0.1, 0.2, 0.3]))
+    t_m_y = vision.Frame(np.array([0.0, 0.0, -0.5]), np.eye(3))
+    v = np.array([0.0, -0.008, 0.006])
+    f = vision.rendezvous_start_pose(nominal, t_m_y, v, np.zeros(3), 15.0)
+    assert np.allclose(f.rot, nominal.rot) and np.allclose(f.pos, nominal.pos - v * 15.0)
+
+
+def test_yaw_about_base_turns_position_and_orientation_about_the_base_axis():
+    base = Frame(np.array([1.0, 2.0, 0.0]), np.eye(3))
+    pose = Frame(np.array([4.0, 2.0, 1.5]), np.eye(3))  # 3 m from the base axis, along +X
+    out = vision.yaw_about_base(pose, base, 90.0)
+    assert np.allclose(out.pos, [1.0, 5.0, 1.5], atol=1e-9)  # swung to +Y, height unchanged
+    assert np.allclose(out.rot @ np.array([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0], atol=1e-9)
+    assert np.allclose(vision.yaw_about_base(pose, base, 0.0).pos, pose.pos)
+    assert np.linalg.norm(out.pos[:2] - base.pos[:2]) == pytest.approx(3.0)  # radius kept

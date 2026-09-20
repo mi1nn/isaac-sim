@@ -2,8 +2,8 @@
 
 Phase 1 문서: [`mrv_phase1_vision_capture.md`](mrv_phase1_vision_capture.md) (구조, 좌표계, 상태 머신은 그대로)
 
-> 상태: **코드 구현 + 정적 검토 완료, Isaac Sim 실행 검증 전.**
-> 아래 TEST 0–6 은 Isaac Sim PC 에서 수행할 검증 계획이며, 아직 어떤 항목도 실행으로 확인되지 않았습니다.
+> 상태: **2026-09-20 headless 1회 실행 검증 (six_dof, dynamic)**: 접근 → 캡처(29 s) → 10 s holding → retreat 성공.
+> 발견/수정한 문제와 남은 문제는 아래 "실행 검증 결과" 참고. 아래 TEST 0–6 중 GUI 확인과 회귀(TEST 0) 는 사용자 실행 대상입니다.
 
 ## 구조
 
@@ -82,6 +82,21 @@ Ground Truth 는 제어에 쓰지 않고 로그 / 판정 / 시각화에만 씁�
 - `mep_com`: MEP 몸체 안의 COM 위치(질량 특성)를 시작 시 한 번 읽어 기준으로 사용 → 편향 0. 실시간 pose 는 쓰지 않지만 모델 정보를 쓰므로 선택 사항으로 두었습니다.
 
 ## 시작 자세 (six_dof)
+
+`mep.rotation_start` 로 회전 방향 관계를 고릅니다.
+
+| 값 | 동작 |
+|---|---|
+| `converge` (기본) | 시작 자세를 `Exp(-w t_r)` 로 미리 돌려 놓아 `rendezvous_time_s` (15 s) 에 명목(평행) 자세를 지나감 — 처음엔 점점 평행해짐 |
+| `diverge` | 명목 자세로 시작해 점점 벌어짐 — 팔이 회전을 쫓아가야 함. 위치는 기존처럼 t_r 에 명목 위치를 지나감 |
+
+```bash
+~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --set mep.motion_mode=six_dof --set mep.rotation_start=diverge
+```
+
+`diverge` 실행 확인 (headless, 기본 각속도): t = 0 에서 팔-MEP 각도 0.00°, MEP 자세가 시작 대비 2.3° (5 s) → 7.0° (15 s) → 13.0° (28 s) 로 벌어짐,
+29.4 s 에 캡처 (GT 거리 0.0967 m, 각도 0.065°, 측면 4.95 mm, 상대 각속도 0.0009 rad/s), 10 s holding 통과.
+retreat 도중 실행 시간 제한(500 s)에 걸려 최종 요약은 받지 못함.
 
 MEP 는 `rendezvous_time_s` (15 s) 뒤 명목 자세를 지나도록 시작합니다. 회전은 `Q = Exp(−w t_r)` 를 **Cylinder_01 중심으로** 되돌립니다(`vision.rendezvous_start_pose`).
 그래서 t = 0 에서 관측 자세의 카메라는 Phase 1 과 같은 위치에서 제자리 회전(7.5°)만 된 태그를 봅니다.
@@ -166,3 +181,22 @@ Phase 1 열(앞 36개 + 추가 열)은 순서 그대로 유지하고 뒤에 다�
 - `[NEEDS_ISAAC_VALIDATION]` 회전 목표 IK 추종: 게이트(측면 10 mm, 1°)를 지키며 slow approach 가 진행되는지, 관절 한계
 - `[NEEDS_ISAAC_VALIDATION]` 회전하는 3 t MEP 부착 시 FixedJoint / 팔이 각운동량을 흡수하는 과정의 안정성
 - `[NEEDS_ISAAC_VALIDATION]` 시작 자세 근사 (t_r 통과 오차, 초기 태그 가시성)
+
+
+## 실행 검증 결과 (2026-09-20, headless, `--set mep.motion_mode=six_dof`)
+
+**수정한 문제 — MEP 각속도가 감쇠하고 있었음 (PhysX 기본 각 감쇠 0.05 1/s)**
+- `RigidBodyPropertiesCfg()` 의 감쇠를 지정하지 않아 PhysX 기본값이 적용되어 25 s 동안 `|w|` 가 0.0084 → 0.0025 rad/s 로 감소 (지수 피팅 감쇠율 0.0496 1/s). 무중력 자유유영이 아니었고 등각속도 모델과도 맞지 않았음.
+- `vision_task.py` `apply_vision_config` 에서 MEP 의 `linear_damping = angular_damping = 0` 으로 고정. 수정 후 `root_com_ang_vel_w` 는 지령값을 유지 (0.00502 vs 0.005 rad/s, 20 s 동안 |w| 0.00878 → 0.00889 로 세차에 의한 변화만).
+- 수정 전 캡처 결과(29 s): 위치 예측 오차 평균 0.35 mm, 자세 예측 0.065°, 캡처 시 상대 각속도 0.0007 rad/s.
+
+**남은 문제 (미해결, 원인 미확인) — 보고 각속도와 자세 변화율이 8 % 불일치**
+- 자세(쿼터니언)에서 구한 회전율은 0.00809 rad/s 로 20 s 내내 일정 (0.01 % 이내), `root_com_ang_vel_w` 와 지령값은 0.00878 rad/s. 비율 0.922, 세 축 모두 같은 비율, 방향 오차 0.09°.
+- 선속도는 정확함 (위치 피팅 v = [0, -8.011, 6.008] mm/s vs 지령 [0, -8, 6]) → 시간 진행 문제가 아님. 원인은 아직 모름 (PhysX 각속도 적분 / 초기 각속도 적용 방식 의심).
+- 영향: 예측기는 자세에서 w 를 추정하므로 제어에는 영향 없음 (자세 예측 오차 0.07°). `[6DOF] Angular velocity estimation` 의 `|w_est − w_gt|` 는 GT 쪽(`root_com_ang_vel_w`) 이 8 % 높아서 약 0.0007 rad/s 의 바이어스를 포함. 상대 각속도(EE vs MEP) 판정도 같은 GT 값을 씀.
+- 그래서 `[6DOF] Angular velocity is a world-frame vector` 는 **방향**(5° 미만 + world 해석이 body 해석보다 가까움)으로만 판정하고, 크기 불일치는 별도 `[6DOF] Rotation rate vs commanded (report)` 로 분리해 값을 기록합니다. 이전 판정(크기 5 %)은 이 불일치 때문에 FAIL 이었음.
+
+**그 밖의 관찰**
+- MEP COM 이 루트에서 [-6.41, 0.41, -1.33] m 떨어져 있어 (Cylinder_01 까지 약 1.4 m), 시작 자세 근사가 정확하지 않음: t = 0 에서 GT 기준 측면 194 mm / 6.2° 벗어난 채 시작하지만 팔이 4 s 안에 측면 5.9 mm 로 수렴 (문제 없음, 필요하면 COM 기준 회전으로 개선 가능).
+- 캡처 시 (GT) 거리 0.0967 m, 각도 0.015°, 측면 2.7 mm, 상대 속도 7.4 mm/s, 상대 각속도 0.0007 rad/s. 관절 정지 후 holding 중 MEP-EE 상대 드리프트 0.12 mm / 0.004°.
+- 자세 예측(0.3 s 앞)은 평균 0.065° 로 "현재 자세 유지"(0.050°) 보다 약간 나쁨 — 이 각속도(0.5 °/s)에서는 예측 이득이 없음. 더 빠른 회전에서 재평가 필요.

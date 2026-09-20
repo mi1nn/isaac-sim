@@ -31,6 +31,10 @@ mep:
   # the position then passes the nominal only approximately (PhysX rotates the body
   # about its centre of mass -- see docs/mrv_six_dof_capture.md).
   rendezvous_time_s: 15.0
+  # six_dof only. converge: the MEP turns into the nominal (parallel) orientation at
+  # rendezvous_time_s (start orientation rotated back by Exp(-w t)); diverge: it starts in
+  # the nominal orientation and turns away from it, so the arm chases the rotation.
+  rotation_start: converge
 
 camera:
   name: cam_wrist
@@ -48,9 +52,13 @@ camera:
   mount_link_z_m: -0.45
   # RTX anti-aliasing for the whole app: Off | FXAA | DLSS | TAA | DLAA
   antialiasing: "Off"
-  # Render 2x and area-downsample (true coverage anti-aliasing of the tag edges):
-  # single-image reprojection RMS 0.63 -> 0.42 px in the static test
-  supersample: 2
+  # Render `supersample` x the resolution and area-downsample (anti-aliasing of the tag edges).
+  # 1 (set for speed: ~3x faster in the 10 s timing test; accuracy over the whole scenario
+  # still to be verified). 2 was the earlier value: single-image reprojection RMS
+  # 0.63 -> 0.42 px in the static test
+  supersample: 1
+  # headless only: render only the frames the vision system uses (vision.rate_hz)
+  render_on_vision_only: false
 
 apriltag:
   family: tag36h11
@@ -112,6 +120,19 @@ approach:
   start_at_observe_pose: true
   # 0.7 m keeps each 60 mm tag at ~34 px with the 90 deg lens (36h11 decodes from ~30 px)
   observe_distance_m: 0.7
+  # Start the arm swung about its base axis (azimuth) by this angle [deg]: the wrist camera
+  # then does not see the MEP and SEARCH swings the arm back until the tags are seen.
+  # 0: start at the observation pose. (`--start_yaw_deg 15` on the command line)
+  start_yaw_offset_deg: 0.0
+  # SEARCH swing speed (arm without payload). The normal 5 cm tracking-lag gate caps it at
+  # ~80 mm/s with the overdamped Canadarm3 drives, hence the wider gate / joint step here.
+  # 0.25 / 0.20 / 0.08 was run: ~230 mm/s, tags found in 4.1 s from a 15 deg start. A more
+  # aggressive 0.6 / 0.60 / 0.15 was tried afterwards and sent the arm off in the wrong
+  # direction (a 0.6 m reference lead + 0.15 rad IK steps push the DLS IK to another
+  # solution), so do not raise the lag / joint step much further.
+  search_speed_mps: 0.25
+  search_lag_m: 0.20
+  search_max_joint_step_rad: 0.08
   # Stage A/B: track the predicted target this far in front of the MEP face [m]
   approach_standoff_m: 0.6
   # Final EE-contact-face to MEP-face gap at capture [m]
@@ -174,3 +195,135 @@ logging:
   overlay_every_sec: 1.0
   # Isaac Sim debug draw (points, axes, velocity vectors); the 2D overlay is always saved
   debug_draw: true
+
+ros:
+  # ROS 2 interface (rclpy). Off by default; `vision_capture.py --ros` turns it on.
+  # Topics (all under /<namespace>/):
+  #   out:  cam_wrist/image_raw, cam_wrist/camera_info, estimate/cylinder_pose,
+  #         predicted/cylinder_pose, estimate/mep_twist, ee/pose, ee/target_pose,
+  #         gt/cylinder_pose, gt/mep_twist (evaluation only), state, captured, status, /tf
+  #   in:   cmd/start (Empty), cmd/abort (Empty), cmd/capture_enable (Bool)
+  enabled: false
+  node_name: mrv_vision_capture
+  namespace: mrv
+  world_frame: world
+  publish_rate_hz: 10.0
+  publish_image: true
+  publish_tf: true
+  publish_ground_truth: true
+  # true: the arm holds at the observation pose until cmd/start arrives
+  require_start_cmd: false
+  distro: jazzy
+
+docking:
+  # Phase 2: the captured MEP's Ares1 probe is docked into the satellite thruster.
+  # Off by default; `vision_capture.py --dock` turns it on. Frames come from
+  # `docking.py` (PROBE_DOCK_POINT = probe tip, SAT_DOCK_POINT = `dock_depth` inside
+  # the nozzle); all errors are expressed in the satellite dock frame, never world XYZ.
+  enabled: false
+  # true: skip the AprilTag capture and start with the MEP attached at its nominal grasp
+  # pose (docking iteration speed; capture itself is covered by the other scenarios)
+  skip_capture: false
+  settle_time_s: 1.0
+
+  # Satellite free drift [m/s] (world). This phase is translation only: no rotation is
+  # applied to the satellite or the MEP (`mep.motion_mode: translation_only`).
+  satellite_velocity_mps: 0.0
+  satellite_drift_direction: [0.0, -1.0, 0.0]
+
+  # Probe tip standoff in front of the nozzle exit at the pre-dock pose [m]
+  pre_dock_distance_m: 1.0
+
+  # Alignment gate, measured in the dock frame before any insertion
+  align_lateral_m: 0.01
+  align_axis_deg: 0.5
+  align_roll_deg: 1.0
+  align_hold_s: 0.5
+  # The probe tip must also be at rest before inserting (max displacement over the window)
+  # At least half of the arm + payload period (~20 s): a short window is satisfied at
+  # every turning point of an oscillation that is still running
+  settle_window_s: 12.0
+  settle_window_m: 0.008
+
+  # Transport to the pre-dock pose (free space): the probe tip has to be swung about
+  # 5.5 m sideways onto the thruster axis, so this is the speed that sets the run time
+  # 0.10 m/s is the carry speed the existing GT docking demo used for the same payload;
+  # 0.25 m/s left the 3 t payload swinging +-150 mm at the pre-dock pose
+  transport_speed_mps: 0.10
+
+  # Docking-axis approach: fast far away, controlled near, slow for the insertion
+  approach_speed_mps: 0.10
+  slow_zone_m: 0.30
+  near_speed_mps: 0.03
+  insertion_zone_m: 0.10
+  insertion_speed_mps: 0.01
+  # Slow on purpose: a correction finished in much less than the arm + 3 t payload period
+  # (~20 s) re-excites that mode and the residual swing then sits on the alignment gate
+  align_speed_mps: 0.008
+  align_speed_deg_s: 1.0
+  # Continuous deceleration (v <= decel_gain_hz * remaining distance, min creep_speed_mps)
+  # instead of an on/off target: stopping the reference abruptly rings the lightly damped
+  # arm + 3 t payload mode (period ~20 s)
+  decel_gain_hz: 0.05
+  creep_speed_mps: 0.002
+  # Ramp-up limit [m/s^2]: stepping the commanded speed kicks the 3 t payload sideways
+  accel_mps2: 0.005
+  # Active damping of the arm + 3 t payload swing (0 disables): the joint velocity target
+  # is biased against the measured probe-tip velocity error
+  # (Tried at 1.0: destabilised the arm within 0.1 s, the drives already have a large
+  # velocity gain. Off by default.)
+  swing_damping: 0.0
+  # Anti-windup for the held joint target, in multiples of the per-step joint limit
+  joint_target_windup: 5.0
+  # Closed loop: forward motion stops and the demo re-aligns when the alignment leaves
+  # these (wider than the gate above, so a resumed approach does not abort at once)
+  approach_abort_lateral_m: 0.02
+  approach_abort_axis_deg: 1.5
+
+  # Docking conditions -- all of them must hold before the FixedJoint is created
+  dock_axial_m: 0.01
+  dock_radial_m: 0.01
+  dock_axis_deg: 0.5
+  dock_roll_deg: 1.0
+  max_relative_velocity_mps: 0.02
+  min_wall_clearance_m: 0.02
+
+  # `cam_probe` depth: distance_to_image_plane along the docking axis, compared with
+  # the distance computed from the frames. An invalid/disagreeing reading stops the
+  # approach (there is no blind-advance fallback).
+  depth_enabled: true
+  depth_patch_px: 9
+  depth_min_m: 0.05
+  depth_max_m: 12.0
+  depth_agreement_m: 0.15
+  # Offset from SAT_DOCK_POINT to the surface the ray hits [m]; measured once at the
+  # pre-dock pose when `auto_calibrate` is true (the collision-only back plate is not
+  # rendered, so the ray lands on the thruster mesh behind it)
+  depth_surface_offset_m: 0.1
+  auto_calibrate: true
+  require_depth: true
+
+  # 240 s per state, as in the existing GT docking demo: the 5.5 m transport of the 3 t
+  # payload converges without oscillation but takes ~150 s at these speeds
+  stage_timeout_s: 240.0
+  # Whole docking phase: a pair of states bouncing between each other keeps resetting
+  # the per-state timeout, so the phase needs its own budget
+  phase_timeout_s: 600.0
+  hold_duration_s: 10.0
+
+probe_camera:
+  # RGB-D camera on the Ares1 probe, used by the docking phase. It sits on the probe
+  # axis `offset_from_tip_m` in front of the tip, looking along the insertion
+  # direction, so the rod never occludes the ray used for the depth reading. RGB is for
+  # watching the approach; depth (distance_to_image_plane) measures the docking-axis
+  # distance. Position and orientation are measured from the spawned USD at startup
+  # (PROBE_DOCK_POINT in `docking.py`), not hard-coded.
+  enabled: true
+  name: cam_probe
+  width: 640
+  height: 480
+  horizontal_fov_deg: 70.0
+  horizontal_aperture_mm: 20.955
+  clipping_range_m: [0.01, 30.0]
+  offset_from_tip_m: 0.02
+  rgb_every_sec: 1.0

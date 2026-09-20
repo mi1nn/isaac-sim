@@ -17,10 +17,10 @@ the EE axis; its index of refraction is `capture.cylinder_ior` (1.0: no refracti
 """
 
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
-from pxr import Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom
 
 from srb.core.sensor import CameraCfg, PinholeCameraCfg
 from srb.utils.cfg import configclass
@@ -55,6 +55,11 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
         """(Re)apply the YAML values that live in the env config (call after overrides)."""
         v = self.load_vision()
         self.scene.debris.spawn.mass_props.mass = float(v.mep.mass_kg)
+        # Free flight: no velocity damping. Left unset, PhysX applies its default angular
+        # damping (0.05 1/s), which slowed the 6-DoF spin by ~5 % per second (measured
+        # 0.0084 -> 0.0025 rad/s over 25 s), so the MEP was not constant-twist.
+        self.scene.debris.spawn.rigid_props.linear_damping = 0.0
+        self.scene.debris.spawn.rigid_props.angular_damping = 0.0
         self.scene.debris.init_state.lin_vel = tuple(v.mep.linear_velocity_w().tolist())
         # World frame [rad/s]; zero in translation_only
         self.scene.debris.init_state.ang_vel = tuple(v.mep.angular_velocity_w().tolist())
@@ -67,6 +72,34 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
             # UsdGeom.Cylinder radius 0.5 (axis Z) under the uniformly scaled MEP prim
             radial = r / (0.5 * float(self.scene.debris.spawn.scale[0]))
             self.debris_marker_xform = (translate, orient, (radial, radial, scale[2]))
+        # Docking phase: the satellite free-floats too (translation only in this phase)
+        sat_v = np.asarray(v.docking.satellite_drift_direction, dtype=float) * float(v.docking.satellite_velocity_mps)
+        self.scene.satellite.spawn.rigid_props.linear_damping = 0.0
+        self.scene.satellite.spawn.rigid_props.angular_damping = 0.0
+        self.scene.satellite.init_state.lin_vel = tuple(sat_v.tolist())
+        self.scene.satellite.init_state.ang_vel = (0.0, 0.0, 0.0)
+        # RGB-D camera on the Ares1 probe. The prim is a child of the MEP body so it
+        # follows it; its pose on the probe axis is measured and written in
+        # `_setup_scene` (the probe tip is only known once the USD is on the stage).
+        pc = v.probe_camera
+        if pc.enabled:
+            setattr(
+                self.scene,
+                pc.name,
+                CameraCfg(
+                    prim_path=f"{self.scene.debris.prim_path}/{pc.name}",
+                    offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=(1.0, 0.0, 0.0, 0.0), convention="ros"),
+                    update_period=0.0,
+                    width=int(pc.width),
+                    height=int(pc.height),
+                    data_types=["rgb", "distance_to_image_plane"],
+                    spawn=PinholeCameraCfg(
+                        focal_length=pc.focal_length_mm,
+                        horizontal_aperture=pc.horizontal_aperture_mm,
+                        clipping_range=tuple(pc.clipping_range_m),
+                    ),
+                ),
+            )
         c = v.camera
         # Global RTX anti-aliasing (the default DLSS renders at a lower resolution and
         # upsamples, which moves tag edges by sub-pixels from frame to frame)
@@ -157,17 +190,123 @@ class VisionCaptureTask(DockingTask):
         ## starts), so Cylinder_01 passes the nominal pose at t_r only approximately:
         ## miss ~ |w| t_r |COM -> Cylinder_01| (NEEDS_ISAAC_VALIDATION; the COM offset is
         ## logged at start). With w = 0, Q = I and this is exactly the Phase 1 pose.
+        ## RGB-D camera on the probe: on the probe axis, `offset_from_tip_m` in front of
+        ## the tip, looking along the insertion direction (+Z), so the rod never occludes
+        ## the principal ray used for the depth reading. `probe_dock` is the measured
+        ## PROBE_DOCK_POINT (tip + axis) in the MEP body frame.
+        self.probe_cam_in_mep: Optional[Frame] = None
+        pc = v.probe_camera
+        if pc.enabled:
+            axis = geo.probe_dock.rot[:, 2]  # insertion direction (out of the tip)
+            # A USD camera looks along its own -Z, so the prim's +Z is the *opposite* of
+            # the viewing direction. Writing the prim transform directly (below) bypasses
+            # the `convention="ros"` conversion CameraCfg would have done, so the USD
+            # convention is applied here instead -- with +Z = axis the camera looked
+            # backwards along the probe and every depth reading came back empty.
+            cam = frame_from_axes(
+                geo.probe_dock.pos + pc.offset_from_tip_m * axis, -axis, geo.probe_dock.rot[:, 0]
+            )
+            self.probe_cam_in_mep = cam
+            # The translucent dock indicator is a full disc across the nozzle exit, and a
+            # depth image records the first hit whatever its opacity, so it would be the
+            # only thing this camera ever ranges to (measured: raw 0.93 m at the pre-dock
+            # pose, i.e. the exit plane, instead of the nozzle interior). The docking
+            # phase shows the same state through its debug draw instead.
+            indicator = stage.GetPrimAtPath(self.dock_indicator_path)
+            if indicator.IsValid():
+                UsdGeom.Imageable(indicator).MakeInvisible()
+                print(f"[INIT] dock indicator disc hidden: it would block every {pc.name} depth ray", flush=True)
+            # ...and replaced by a ring on the nozzle rim: it marks the docking interface
+            # (colour = docking state, set by the demo) without covering the axis
+            self.dock_ring_path = None
+            try:
+                self.dock_ring_path = spawn_dock_ring(stage, geo)
+                print(f"[INIT] dock ring (rim marker, coloured by the docking state): {self.dock_ring_path}", flush=True)
+            except Exception as e:  # a marker must never stop the run
+                print(f"[INIT] dock ring not created ({e}); the nozzle has no marker", flush=True)
+            # Local (parent-scaled) transform under the MEP prim
+            set_local_pose(stage, f"{mep_path}/{pc.name}", cam, float(scale[0]))
+            print(f"[INIT] {pc.name}: probe-axis camera at {np.round(cam.pos, 4).tolist()} (MEP body frame), viewing direction "
+                  f"{np.round(axis, 4).tolist()} (USD prim +Z = {np.round(cam.rot[:, 2], 4).tolist()}), "
+                  f"{pc.offset_from_tip_m*1000:.0f} mm in front of the tip, {pc.width}x{pc.height}, "
+                  f"FOV {pc.horizontal_fov_deg:g} deg, rgb + distance_to_image_plane", flush=True)
+
         _, mep_nominal, _ = geo.placement()
         self.mep_nominal = mep_nominal
         drift = v.mep.linear_velocity_w()
         omega = v.mep.angular_velocity_w()
-        mep_start = rendezvous_start_pose(mep_nominal, self.t_m_y, drift, omega, v.mep.rendezvous_time_s)
+        ## rotation_start "diverge": no back-rotation -> the MEP starts in the nominal
+        ## orientation (position still passes the nominal at t_r) and turns away from it
+        omega_back = omega if v.mep.rotation_start == "converge" else np.zeros(3)
+        mep_start = rendezvous_start_pose(mep_nominal, self.t_m_y, drift, omega_back, v.mep.rendezvous_time_s)
         set_prim_pose(stage, mep_path, mep_start)
         for cfg in (self.cfg.scene.debris, self.scene["debris"].cfg):
             cfg.init_state.pos = tuple(mep_start.pos.tolist())
             cfg.init_state.rot = mep_start.quat
             cfg.init_state.lin_vel = tuple(drift.tolist())
             cfg.init_state.ang_vel = tuple(omega.tolist())
+
+
+def spawn_dock_ring(stage, geo, inner_factor: float = 0.75, segments: int = 96) -> str:
+    """Flat ring on the nozzle exit rim (visual only, no collider, open in the middle).
+
+    A full disc across the exit blocks the depth ray on the docking axis, so the marker
+    is an annulus between `inner_factor` x the exit radius and the exit radius. Its
+    colour is the `diffuseColor` / `emissiveColor` of the preview surface below it.
+    """
+    from pxr import Gf, Sdf, UsdShade, Vt
+
+    scale = float(np.mean(geo.sat_scale))
+    frame = geo.sat_exit  # +Z = into the nozzle, in the satellite body frame
+    path = f"{geo.sat_body_path}/dock_ring"
+    xf = UsdGeom.Xform.Define(stage, path)
+    xf.AddTranslateOp().Set(Gf.Vec3d(*(frame.pos / scale).tolist()))
+    xf.AddOrientOp().Set(Gf.Quatf(*frame.quat))
+    r_out = geo.nozzle.exit_radius / scale
+    r_in = r_out * inner_factor
+    ang = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    pts = [Gf.Vec3f(float(r_in * np.cos(a)), float(r_in * np.sin(a)), 0.0) for a in ang]
+    pts += [Gf.Vec3f(float(r_out * np.cos(a)), float(r_out * np.sin(a)), 0.0) for a in ang]
+    idx = []
+    for i in range(segments):
+        j = (i + 1) % segments
+        idx += [i, j, segments + j, segments + i]
+    mesh = UsdGeom.Mesh.Define(stage, f"{path}/ring")
+    mesh.CreatePointsAttr(Vt.Vec3fArray(pts))
+    mesh.CreateFaceVertexCountsAttr(Vt.IntArray([4] * segments))
+    mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(idx))
+    mesh.CreateDoubleSidedAttr(True)
+    mat = UsdShade.Material.Define(stage, f"{path}/Material")
+    sh = UsdShade.Shader.Define(stage, f"{path}/Material/Shader")
+    sh.CreateIdAttr("UsdPreviewSurface")
+    sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(1.0, 0.2, 0.2))
+    sh.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(1.0, 0.2, 0.2))
+    sh.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.85)
+    mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(mat)
+    return path
+
+
+def set_local_pose(stage, path: str, frame: Frame, parent_scale: float = 1.0):
+    """Write `frame` as the prim's local transform under a uniformly scaled parent.
+
+    PhysX/USD apply the parent's scale to a child's translation, so a pose measured in
+    the parent's *metric* body frame is divided by that scale here (the same correction
+    the tag constellation and the capture marker use).
+    """
+    prim = stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        raise ValueError(f"Prim not found (camera not spawned?): {path}")
+    xf = UsdGeom.Xformable(prim)
+    # The spawner already authored xform ops on this prim, and `AddXformOp` refuses to
+    # re-add an existing one, so the old ops are removed before the measured pose is
+    # written (the op *order* alone can be cleared, the attributes stay).
+    xf.ClearXformOpOrder()
+    for name in ("xformOp:translate", "xformOp:orient", "xformOp:rotateXYZ", "xformOp:rotateXYZW", "xformOp:scale", "xformOp:transform"):
+        if prim.HasAttribute(name):
+            prim.RemoveProperty(name)
+    xf.AddTranslateOp().Set(Gf.Vec3d(*(frame.pos / parent_scale).tolist()))
+    xf.AddOrientOp().Set(Gf.Quatf(*frame.quat))
 
 
 def spawn_smooth_cylinder(stage, path: str, radius: float, length: float, segments: int = 128, parent_scale: float = 1.0):

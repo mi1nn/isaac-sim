@@ -32,6 +32,12 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .frames import Frame, rotation_angle
+from .probe_dock import (
+    DockingVisionCfg,
+    ProbeCameraCfg,
+    validate_docking_cfg,
+    validate_probe_camera_cfg,
+)
 
 ##############
 ### Config ###
@@ -42,6 +48,10 @@ MOTION_MODES = ("translation_only", "six_dof")
 # six_dof prediction reference: the tag constellation T (vision + the design-time
 # T_T_Y only) or the MEP centre of mass (moves in a straight line in free flight)
 REFERENCE_FRAMES = ("tag", "mep_com")
+# six_dof start orientation: "converge" = the MEP turns INTO the nominal (parallel) orientation
+# at `rendezvous_time_s` and away from it afterwards; "diverge" = it starts in the nominal
+# orientation and turns away from it, so the arm has to chase the rotation
+ROTATION_STARTS = ("converge", "diverge")
 
 
 @dataclass
@@ -57,6 +67,8 @@ class MepVisionCfg:
     # `RigidObjectCfg.InitialStateCfg.ang_vel` / `root_com_ang_vel_w` convention)
     angular_velocity_rad_s: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     rendezvous_time_s: float = 15.0
+    # six_dof only, see ROTATION_STARTS
+    rotation_start: str = "converge"
 
     @property
     def six_dof(self) -> bool:
@@ -85,6 +97,9 @@ class CameraVisionCfg:
     antialiasing: str = "Off"
     # Render at `supersample` x the resolution and area-average down to width x height
     supersample: int = 1
+    # headless only: render the scene (and so `cam_wrist`) only for the frames the vision
+    # system uses (`vision.rate_hz`) instead of every `render_interval` physics steps
+    render_on_vision_only: bool = False
 
     @property
     def focal_length_mm(self) -> float:
@@ -132,6 +147,18 @@ class PredictionCfg:
 @dataclass
 class ApproachCfg:
     start_at_observe_pose: bool = True
+    # Start the arm swung about its base axis (azimuth) by this angle [deg] instead of
+    # at the observation pose: the wrist camera then does not look at the MEP, and the
+    # SEARCH state has to swing the arm back until the AprilTags come into view.
+    # 0: start exactly at the observation pose.
+    start_yaw_offset_deg: float = 0.0
+    # SEARCH swing (only when the arm starts off the observation pose). The normal
+    # tracking gate stops the reference as soon as the arm lags it by 5 cm, which with
+    # the overdamped Canadarm3 drives (lag = v * 0.625 s) caps the speed at ~80 mm/s.
+    # The arm carries no payload here, so the gate and the joint step can be wider.
+    search_speed_mps: float = 0.25
+    search_lag_m: float = 0.20
+    search_max_joint_step_rad: float = 0.08
     observe_distance_m: float = 0.7
     approach_standoff_m: float = 0.6
     final_gap_m: float = 0.05
@@ -193,6 +220,29 @@ class LoggingVisionCfg:
 
 
 @dataclass
+class RosVisionCfg:
+    """Optional ROS 2 interface (`ros_interface.py`): telemetry out, start / abort /
+    capture-enable commands in. Off by default; `vision_capture.py --ros` switches it on."""
+
+    enabled: bool = False
+    node_name: str = "mrv_vision_capture"
+    # Every topic lives under /<namespace>/ (no leading slash)
+    namespace: str = "mrv"
+    world_frame: str = "world"
+    # Pose / twist / status topics [Hz] (simulation time); the camera topics follow vision.rate_hz
+    publish_rate_hz: float = 10.0
+    publish_image: bool = True
+    publish_tf: bool = True
+    # Ground-truth topics (`gt/...`): evaluation only, never used by the controller
+    publish_ground_truth: bool = True
+    # true: the arm holds at the observation pose until `cmd/start` arrives (the MEP keeps
+    # drifting meanwhile, and `test.dynamic_timeout_sec` keeps counting)
+    require_start_cmd: bool = False
+    # Isaac Sim ROS 2 bridge distro used when rclpy is not already sourced
+    distro: str = "jazzy"
+
+
+@dataclass
 class VisionCaptureConfig:
     mep: MepVisionCfg = field(default_factory=MepVisionCfg)
     camera: CameraVisionCfg = field(default_factory=CameraVisionCfg)
@@ -203,6 +253,11 @@ class VisionCaptureConfig:
     capture: CaptureVisionCfg = field(default_factory=CaptureVisionCfg)
     test: TestVisionCfg = field(default_factory=TestVisionCfg)
     logging: LoggingVisionCfg = field(default_factory=LoggingVisionCfg)
+    ros: RosVisionCfg = field(default_factory=RosVisionCfg)
+    # Ares1 probe -> satellite thruster docking phase (`probe_dock.py`)
+    docking: DockingVisionCfg = field(default_factory=DockingVisionCfg)
+    # RGB-D camera on the Ares1 probe (docking phase)
+    probe_camera: ProbeCameraCfg = field(default_factory=ProbeCameraCfg)
 
     def to_dict(self) -> dict:
         def conv(obj):
@@ -254,11 +309,18 @@ def load_vision_config(path: Optional[str | Path] = None, overrides: Sequence[st
     if w.shape != (3,) or not np.isfinite(w).all():
         raise ValueError(f"mep.angular_velocity_rad_s must be 3 finite values [rad/s], got {cfg.mep.angular_velocity_rad_s}")
     cfg.mep.angular_velocity_rad_s = w.tolist()
+    if cfg.mep.rotation_start not in ROTATION_STARTS:
+        raise ValueError(f"mep.rotation_start must be one of {ROTATION_STARTS}, got '{cfg.mep.rotation_start}'")
     if cfg.prediction.reference_frame not in REFERENCE_FRAMES:
         raise ValueError(f"prediction.reference_frame must be one of {REFERENCE_FRAMES}, got '{cfg.prediction.reference_frame}'")
     if cfg.mep.six_dof and np.linalg.norm(w) >= cfg.prediction.max_plausible_angular_rate_rad_s:
         raise ValueError("mep.angular_velocity_rad_s exceeds prediction.max_plausible_angular_rate_rad_s "
                          "(the estimate would always be rejected)")
+    validate_docking_cfg(cfg.docking)
+    validate_probe_camera_cfg(cfg.probe_camera)
+    if cfg.ros.publish_rate_hz <= 0.0 or not cfg.ros.namespace.strip("/"):
+        raise ValueError("ros.publish_rate_hz must be > 0 and ros.namespace must not be empty")
+    cfg.ros.namespace = cfg.ros.namespace.strip("/")
     if cfg.apriltag.min_tags_for_pose < 2:
         raise ValueError("apriltag.min_tags_for_pose must be >= 2 (constellation PnP)")
     if len(set(cfg.apriltag.ids)) != 4:
@@ -742,6 +804,17 @@ def so3_exp(w) -> np.ndarray:
 def so3_log(r: np.ndarray) -> np.ndarray:
     """Log of a rotation matrix as a rotation vector [rad] (|result| <= pi)."""
     return rotvec_from_rotmat(r)
+
+
+def yaw_about_base(pose: Frame, base: Frame, deg: float) -> Frame:
+    """`pose` rotated by `deg` about the base +Z axis through the base origin (azimuth).
+
+    Pure rigid rotation of the whole tool pose about the arm's vertical axis: position
+    and orientation both turn, so the camera on it looks at a different bearing.
+    """
+    axis = base.rot[:, 2]
+    r = rotmat_from_rotvec(axis * math.radians(deg))
+    return Frame(base.pos + r @ (pose.pos - base.pos), r @ pose.rot)
 
 
 def rendezvous_start_pose(mep_nominal: Frame, t_m_y: Frame, v_w, w_w, t_r: float) -> Frame:

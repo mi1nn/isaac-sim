@@ -39,6 +39,15 @@ def parse_args():
     parser.add_argument("--tag", type=str, default=None, help="Run name for the output files (default: the scenario name)")
     parser.add_argument("--exit_when_done", action="store_true",
                         help="GUI: close the app when the scenario ends (default: after a success the simulation keeps running until the window is closed)")
+    parser.add_argument("--dock", action="store_true",
+                        help="Run the Ares1 probe -> satellite thruster docking phase after the capture (config `docking:`)")
+    parser.add_argument("--dock_only", action="store_true",
+                        help="--dock, but skip the capture: attach the MEP at its nominal grasp pose and dock straight away")
+    parser.add_argument("--start_yaw_deg", type=float, default=None, metavar="DEG",
+                        help="Start the arm swung DEG degrees in azimuth (about its base axis) so it has to search for the MEP")
+    parser.add_argument("--ros", action="store_true",
+                        help="Enable the ROS 2 interface (telemetry topics + cmd/start, cmd/abort, cmd/capture_enable; see config `ros:`)")
+    parser.add_argument("--ros_wait_start", action="store_true", help="With --ros: hold the arm until a cmd/start message arrives")
     parser.add_argument("--start_paused", action="store_true", help="Wait for Play in the toolbar before starting")
     parser.add_argument("--kit_args", type=str, default=None,
                         help=f'Extra Kit arguments. GUI default: "--ext-folder {isaac_path}/apps --enable isaacsim.exp.base"')
@@ -49,8 +58,32 @@ def parse_args():
     return args
 
 
+def ensure_ros2_env(args):
+    """The Isaac Sim ROS 2 bridge libraries must be on LD_LIBRARY_PATH before the process
+    starts (setting it later does not affect the dynamic loader): re-exec once with the
+    environment the bridge needs."""
+    wants_ros = args.ros or args.ros_wait_start or any(x.replace(" ", "") == "ros.enabled=true" for x in args.sets)
+    if not wants_ros or os.environ.get("MRV_ROS_ENV_READY") == "1":
+        return
+    isaac_path = os.environ.get("ISAAC_PATH", os.path.expanduser("~/isaac-sim"))
+    distro = os.environ.get("ROS_DISTRO") or "jazzy"
+    lib = os.path.join(isaac_path, "exts", "isaacsim.ros2.bridge", distro, "lib")
+    if not os.path.isdir(lib):
+        sys.exit(f"[ROS] bridge libraries not found: {lib} (set ROS_DISTRO to humble / jazzy)")
+    paths = [x for x in os.environ.get("LD_LIBRARY_PATH", "").split(":") if x]
+    if lib not in paths:
+        paths.append(lib)
+    os.environ["LD_LIBRARY_PATH"] = ":".join(paths)
+    os.environ["ROS_DISTRO"] = distro
+    os.environ.setdefault("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
+    os.environ["MRV_ROS_ENV_READY"] = "1"
+    sys.stdout.flush()
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
 def main():
     args = parse_args()
+    ensure_ros2_env(args)
 
     from srb.core.app import AppLauncher
     from srb.utils.path import SRB_APPS_DIR, SRB_LOGS_DIR
@@ -87,6 +120,16 @@ def main():
     sys.argv = [sys.argv[0], "env.robot=canadarm3", *args.overrides, f"hydra.run.dir={hydra_dir}", "hydra.output_subdir=null"]
 
     sets = list(args.sets)
+    if args.start_yaw_deg is not None:
+        sets.append(f"approach.start_yaw_offset_deg={args.start_yaw_deg}")
+    if args.dock or args.dock_only:
+        sets.append("docking.enabled=true")
+    if args.dock_only:
+        sets.append("docking.skip_capture=true")
+    if args.ros or args.ros_wait_start:
+        sets.append("ros.enabled=true")
+    if args.ros_wait_start:
+        sets.append("ros.require_start_cmd=true")
     if args.scenario == "static":
         # Test 1: the MEP is at rest (no drift, no rotation)
         sets.append("mep.linear_velocity_mps=0.0")
