@@ -26,7 +26,7 @@ class Scenario:
         if not math.isfinite(elapsed) or elapsed < 0:
             raise ValueError('elapsed must be finite and nonnegative')
         attached = self.capture_seconds
-        switch = attackhed + self.attached_hold_seconds
+        switch = attached + self.attached_hold_seconds
         docked = switch + self.docking_seconds
         phase = 1 if elapsed < switch else 2
         if elapsed < attached:
