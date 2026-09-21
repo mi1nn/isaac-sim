@@ -427,7 +427,9 @@ probe_camera:
 ## velocities do not have to be zero to dock.
 ## ---------------------------------------------------------------------------------
 client:
-  # false: the satellite (client) stays at rest and `--dock` runs exactly as before
+  # false: the satellite (client) stays at rest and `--dock` runs exactly as before.
+  # `vision_capture.py` turns this on by default (off with --no_moving_dock / --no_dock /
+  # --scenario static); the config default stays false for other callers and the tests
   release_enabled: false
   # true: released at t = 0 -- the client drifts through the MRV approach and the capture,
   # the MRV joins it at the docking handover (d_ref = the NOMINAL client -> MRV offset, so

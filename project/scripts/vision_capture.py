@@ -10,12 +10,15 @@ Must run with the Isaac Sim Python (the same interpreter `srb` uses):
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless
     # 6-DoF -- XYZ drift + combined roll/pitch/yaw rate (mep.angular_velocity_rad_s)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless --tag six_dof --set mep.motion_mode=six_dof
-    # Full pipeline (the default: 6-DoF MEP, start yaw 15 deg, MRV rendezvous + capture + docking, ROS 2 on,
-    # tag full_6dof) -- --no_dock / --no_ros / --start_yaw_deg 0 / --tag NAME switch those off or change them
+    # Full pipeline (the default: 6-DoF MEP, start yaw 15 deg, MRV rendezvous + capture + moving-client
+    # docking, ROS 2 on, tag full_6dof) -- --no_dock / --no_moving_dock / --no_ros / --start_yaw_deg 0 /
+    # --tag NAME switch those off or change them
     ~/isaac-sim/python.sh project/scripts/vision_capture.py
-    # Moving client -- the satellite drifts (+X 0.02 m/s), MRV + MEP match its velocity, dock
-    # while moving, stop, release the MEP, retreat the arm and depart (-X); --dock_only skips the capture
-    ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless --tag moving --dock_only --moving_dock
+    # Moving client (on by default) -- the satellite drifts (+X 0.02 m/s), MRV + MEP match its velocity,
+    # dock while moving, release the MEP and depart (-X); --dock_only skips the capture
+    ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless --tag moving --dock_only
+    # ... docking to a satellite at rest instead (docked hold `docking.hold_duration_s`, then SUCCESS)
+    ~/isaac-sim/python.sh project/scripts/vision_capture.py --no_moving_dock
     # ... the same run without the rendezvous phase (the arm starts at the observation pose)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --dock --no_mrv_approach
     # GUI (debug draw + camera overlay images); after a success the simulation keeps
@@ -53,9 +56,11 @@ def parse_args():
     parser.add_argument("--dock_only", action="store_true",
                         help="--dock, but skip the capture: attach the MEP at its nominal grasp pose and dock straight away")
     parser.add_argument("--moving_dock", action="store_true",
-                        help="--dock with a drifting client: release -> chase -> velocity matching -> rendezvous -> docking "
-                             "-> stop -> robot release -> arm retreat -> MRV departure (config `client:`, `rendezvous:`, "
-                             "`post_docking:`, `separation:`); combine with --dock_only to skip the capture")
+                        help="Docking with a drifting client (the default whenever docking runs): release -> chase -> "
+                             "velocity matching -> rendezvous -> docking -> robot release -> MRV departure (config "
+                             "`client:`, `rendezvous:`, `post_docking:`, `separation:`); kept for old commands")
+    parser.add_argument("--no_moving_dock", action="store_true",
+                        help="Dock to a satellite at rest (the client is not released)")
     parser.add_argument("--no_mrv_approach", action="store_true",
                         help="Skip the MRV rendezvous phase (folded arm -> two translation legs -> arm deploy) "
                              "and start with the arm at the observation pose, as before (config `mrv:`)")
@@ -150,13 +155,17 @@ def main():
         sets.append("mrv.enabled=true")
     if args.dock and args.no_dock:
         sys.exit("[ARGS] --dock and --no_dock are mutually exclusive")
-    if args.moving_dock and args.no_dock:
-        sys.exit("[ARGS] --moving_dock and --no_dock are mutually exclusive")
+    if args.moving_dock and (args.no_dock or args.no_moving_dock):
+        sys.exit("[ARGS] --moving_dock and --no_dock / --no_moving_dock are mutually exclusive")
     if args.no_dock:
         sets.append("docking.enabled=false")
     elif args.dock or args.dock_only or args.moving_dock:
         sets.append("docking.enabled=true")
-    if args.moving_dock:
+    # Moving client: on by default whenever the docking phase runs (the static scenario is
+    # capture only, so it never applies there). An explicit --set of either key wins.
+    user_sets = [x.replace(" ", "") for x in args.sets]
+    user_chose = any(x.startswith("client.release_enabled=") for x in user_sets) or "docking.enabled=false" in user_sets
+    if args.moving_dock or not (args.no_dock or args.no_moving_dock or args.scenario == "static" or user_chose):
         sets.append("client.release_enabled=true")
     if args.dock_only:
         sets.append("docking.skip_capture=true")
