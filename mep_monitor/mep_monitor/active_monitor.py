@@ -30,50 +30,103 @@ DOCKING_STATES = {
 
 
 def mission_progress(state, phase):
+    """
+    Final 7-stage mission progress mapping.
 
-    if state in {
-        "ORBIT_REACHED",
-        "MISSION_SUCCESS",
-    }:
-        return 7
+    1/7 MEP SEARCH
+        INIT -> SEARCH -> TAG_DETECTED
 
-    if state in {
-        "ORBIT_TRANSFER",
-        "ORBIT_FOLLOW",
-    }:
-        return 6
+    2/7 MEP CAPTURE
+        POSE_ESTIMATED -> PREDICTING
+        -> APPROACHING -> SLOW_APPROACH
+        -> CAPTURE_ATTEMPT -> CAPTURED
+        -> HOLDING -> RETREAT
 
-    if phase == "SATELLITE_DOCKING":
+    3/7 MEP ATTACHED / SATELLITE APPROACH
+        DOCK_TARGET_ACQUIRE -> PRE_DOCK_APPROACH
 
-        if state in {
-            "DOCKED",
-            "DOCK_HOLDING",
-            "SUCCESS",
-        }:
-            return 5
+    4/7 SATELLITE DOCKING
+        XY_ALIGN -> ORIENTATION_ALIGN
+        -> ALIGNMENT_CHECK -> Z_APPROACH
+        -> FINAL_INSERTION -> DOCK_READY -> DOCKED
 
-        if state in {
-            "DOCK_TARGET_ACQUIRE",
-            "PRE_DOCK_APPROACH",
-        }:
-            return 3
+    5/7 DOCKED / ARM RELEASE
+        ORBIT_TARGET_ACQUIRE
 
-        return 4
+    6/7 ORBIT TRANSFER
+        ORBIT_TRANSFER -> ORBIT_ARRIVAL_CHECK
+        -> ORBIT_HOLDING
 
-    if state in {
-        "CAPTURED",
-        "HOLDING",
-        "RETREAT",
-        "SUCCESS",
-    }:
-        return 3
+    7/7 ORBIT REACHED
+        SUCCESS
+    """
 
-    if state in {
+    stage_1 = {
+        "INIT",
+        "SEARCH",
+        "TAG_DETECTED",
+    }
+
+    stage_2 = {
+        "POSE_ESTIMATED",
+        "PREDICTING",
         "APPROACHING",
         "SLOW_APPROACH",
         "CAPTURE_ATTEMPT",
-    }:
+        "CAPTURED",
+        "HOLDING",
+        "RETREAT",
+    }
+
+    stage_3 = {
+        "DOCK_TARGET_ACQUIRE",
+        "PRE_DOCK_APPROACH",
+    }
+
+    stage_4 = {
+        "XY_ALIGN",
+        "ORIENTATION_ALIGN",
+        "ALIGNMENT_CHECK",
+        "Z_APPROACH",
+        "FINAL_INSERTION",
+        "DOCK_READY",
+        "DOCKED",
+    }
+
+    stage_5 = {
+        "ORBIT_TARGET_ACQUIRE",
+    }
+
+    stage_6 = {
+        "ORBIT_TRANSFER",
+        "ORBIT_ARRIVAL_CHECK",
+        "ORBIT_HOLDING",
+    }
+
+    stage_7 = {
+        "SUCCESS",
+    }
+
+    if state in stage_1:
+        return 1
+
+    if state in stage_2:
         return 2
+
+    if state in stage_3:
+        return 3
+
+    if state in stage_4:
+        return 4
+
+    if state in stage_5:
+        return 5
+
+    if state in stage_6:
+        return 6
+
+    if state in stage_7:
+        return 7
 
     return 1
 
