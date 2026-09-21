@@ -8,12 +8,13 @@ setup(
     ],
     install_requires=['setuptools'], zip_safe=True,
     maintainer='MEP project maintainer', maintainer_email='maintainer@example.invalid',
-    description='Mock-only satellite mission telemetry', license='Proprietary',
+    description='MEP capture and satellite docking monitoring', license='Proprietary',
     entry_points={'console_scripts': [
         'mock_telemetry = mep_monitor.mock_telemetry:main',
         'monitoring_node = mep_monitor.monitoring_node:main',
         'csv_logger = mep_monitor.csv_logger:main',
         'isaac_metrics_bridge = mep_monitor.isaac_metrics_bridge:main',
         'docking_metrics_bridge = mep_monitor.docking_metrics_bridge:main',
+        'active_monitor = mep_monitor.active_monitor:main',
     ]},
 )
