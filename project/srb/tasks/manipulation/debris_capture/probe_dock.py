@@ -136,6 +136,15 @@ class DockingVisionCfg:
     # the geometric distance is known) and logs it next to `backstop_gap` for comparison.
     depth_surface_offset_m: float = 0.1
     auto_calibrate: bool = True
+    # The calibration is only taken ON the docking axis. The ray lands on the inside of
+    # the bell nozzle, so its depth depends on the lateral offset: calibrated 41 mm off
+    # the axis, every later on-axis reading disagreed by a constant 320 mm and the
+    # approach never advanced (measured, static and moving client alike). The offset is
+    # the median of `depth_calibration_samples` readings within these limits, and the
+    # docking-axis approach does not start before it exists.
+    depth_calibration_max_lateral_m: float = 0.015
+    depth_calibration_max_axis_deg: float = 1.0
+    depth_calibration_samples: int = 10
     # The Z approach requires a valid depth reading (fail-safe, never a blind advance)
     require_depth: bool = True
 
@@ -220,6 +229,10 @@ def validate_docking_cfg(cfg: DockingVisionCfg):
         raise ValueError("docking.depth_patch_px must be a positive odd number of pixels")
     if not 0.0 < cfg.depth_min_m < cfg.depth_max_m:
         raise ValueError("docking requires 0 < depth_min_m < depth_max_m")
+    if cfg.depth_calibration_max_lateral_m <= 0.0 or cfg.depth_calibration_max_axis_deg <= 0.0:
+        raise ValueError("docking.depth_calibration_max_lateral_m / _max_axis_deg must be > 0")
+    if int(cfg.depth_calibration_samples) < 1:
+        raise ValueError("docking.depth_calibration_samples must be >= 1")
 
 
 ######################
@@ -409,6 +422,21 @@ def alignment_ok(cfg: DockingVisionCfg, m: Dict[str, float]) -> Tuple[bool, List
     if not (math.isfinite(m["roll_deg"]) and m["roll_deg"] <= cfg.align_roll_deg):
         bad.append(f"roll {m['roll_deg']:.3f} deg > {cfg.align_roll_deg}")
     return not bad, bad
+
+
+def depth_calibration_sample_ok(cfg: DockingVisionCfg, m: Dict[str, float]) -> Tuple[bool, str]:
+    """May this instant's depth reading be used for the surface-offset calibration?
+
+    Only on the docking axis (`depth_calibration_max_lateral_m`, `_max_axis_deg`) with a
+    valid reading; the tighter-than-alignment limits keep the ray on the same surface
+    it sees during the on-axis approach."""
+    if not (math.isfinite(m["depth_raw"]) and m["depth_pixels"] >= 4):
+        return False, "no valid depth reading"
+    if not m["lateral"] <= cfg.depth_calibration_max_lateral_m:
+        return False, f"lateral {m['lateral']*1000:.1f} mm > {cfg.depth_calibration_max_lateral_m*1000:.0f} mm"
+    if not m["axis_deg"] <= cfg.depth_calibration_max_axis_deg:
+        return False, f"axis {m['axis_deg']:.2f} deg > {cfg.depth_calibration_max_axis_deg}"
+    return True, "ok"
 
 
 def approach_still_aligned(cfg: DockingVisionCfg, m: Dict[str, float]) -> Tuple[bool, List[str]]:

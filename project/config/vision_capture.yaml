@@ -199,6 +199,13 @@ logging:
   overlay_every_sec: 1.0
   # Isaac Sim debug draw (points, axes, velocity vectors); the 2D overlay is always saved
   debug_draw: true
+  # Moving client only (visual, no effect on physics/control): trail of the client / MEP /
+  # MRV positions every motion_trail_period_s with a fixed cross at each start position,
+  # and a GUI window with the live speeds (`--moving_dock`, not shown headless)
+  motion_trail: true
+  motion_trail_period_s: 1.0
+  motion_trail_max_points: 600
+  motion_hud: true
 
 ros:
   # ROS 2 interface (rclpy). Off by default; `vision_capture.py --ros` turns it on.
@@ -289,7 +296,8 @@ docking:
   # true: skip the AprilTag capture and start with the MEP attached at its nominal grasp
   # pose (docking iteration speed; capture itself is covered by the other scenarios)
   skip_capture: false
-  settle_time_s: 1.0
+  # Hold before the docking transport starts [s] (was 1.0; 0 = straight on)
+  settle_time_s: 0.0
 
   # Satellite free drift [m/s] (world). This phase is translation only: no rotation is
   # applied to the satellite or the MEP (`mep.motion_mode: translation_only`).
@@ -301,7 +309,7 @@ docking:
 
   # Alignment gate, measured in the dock frame before any insertion
   align_lateral_m: 0.05
-  align_axis_deg: 3.0
+  align_axis_deg: 12.0
   align_roll_deg: 5.0
   align_hold_s: 0.5
   # The probe tip must also be at rest before inserting (max displacement over the window)
@@ -349,8 +357,8 @@ docking:
   joint_target_windup: 5.0
   # Closed loop: forward motion stops and the demo re-aligns when the alignment leaves
   # these (wider than the gate above, so a resumed approach does not abort at once)
-  approach_abort_lateral_m: 0.08
-  approach_abort_axis_deg: 6.0
+  approach_abort_lateral_m: 0.20
+  approach_abort_axis_deg: 12.0
 
   # Docking conditions -- all of them must hold before the FixedJoint is created
   dock_axial_m: 0.04
@@ -373,6 +381,13 @@ docking:
   # rendered, so the ray lands on the thruster mesh behind it)
   depth_surface_offset_m: 0.1
   auto_calibrate: true
+  # The ray lands on the inside of the bell nozzle, so the reading depends on the lateral
+  # offset: calibrated 41 mm off the axis, every on-axis reading later disagreed by a
+  # constant 320 mm and the approach never advanced. Calibrate on the axis only (median
+  # of N samples); the Z approach waits for it.
+  depth_calibration_max_lateral_m: 0.015
+  depth_calibration_max_axis_deg: 1.0
+  depth_calibration_samples: 10
   require_depth: true
 
   # 240 s per state, as in the existing GT docking demo: the 5.5 m transport of the 3 t
@@ -399,3 +414,120 @@ probe_camera:
   clipping_range_m: [0.01, 30.0]
   offset_from_tip_m: 0.02
   rgb_every_sec: 1.0
+
+## ---------------------------------------------------------------------------------
+## Moving-client docking (`moving_dock.py`, `vision_capture.py --moving_dock`)
+##   capture (or --dock_only) -> CLIENT_RELEASE -> CLIENT_CRUISE -> CHASE
+##   -> VELOCITY_MATCHING -> RENDEZVOUS -> existing docking states -> DOCKED
+##   -> STABILIZING -> STOPPING -> ROBOT_RELEASE -> ARM_RETREAT -> MRV_SEPARATION -> SUCCESS
+## World frame, SI units. Vectors are [x, y, z] (a {x:, y:, z:} mapping also works in
+## this file; `--set` overrides need the list form, e.g.
+## --set "client.linear_velocity_mps=[0.02,0,0]").
+## Every rendezvous / docking gate is on RELATIVE velocity (body - client): the world
+## velocities do not have to be zero to dock.
+## ---------------------------------------------------------------------------------
+client:
+  # false: the satellite (client) stays at rest and `--dock` runs exactly as before
+  release_enabled: false
+  # true: released at t = 0 -- the client drifts through the MRV approach and the capture,
+  # the MRV joins it at the docking handover (d_ref = the NOMINAL client -> MRV offset, so
+  # the MRV first closes the gap the drift opened; the insertion waits for it)
+  release_at_start: true
+  # +X = the docking (insertion) axis = the arm's approach direction, so the MRV chases
+  # along its own approach axis and departs straight back along it (-X, auto)
+  linear_velocity_mps: [0.02, 0.0, 0.0]
+  # The MRV only translates: a rotating client is not a verified configuration
+  angular_velocity_rad_s: [0.0, 0.0, 0.0]
+  # The release is a thrust ramp on the client (F = m a), never a velocity write
+  release_accel_mps2: 0.004
+  release_ang_accel_rad_s2: 0.002
+  release_time_constant_s: 0.5
+  velocity_tolerance_mps: 0.0005
+  angular_tolerance_rad_s: 0.0005
+  release_timeout_s: 30.0
+  # CLIENT_CRUISE: free drift observed this long before the chase. 0 = skipped (demo).
+  # Test 1 of the spec: --set client.cruise_check_s=5.0
+  cruise_check_s: 0.0
+  cruise_max_velocity_change_mps: 0.0005
+  max_speed_mps: 0.2
+  max_angular_rate_rad_s: 0.05
+
+rendezvous:
+  # Closed loop v_cmd = v_client + clip(Kp * e, max_correction), e = (p_client - p_mrv) - d_ref.
+  # Demo default: the MRV keeps its station from the release on (no gap, no chase), so the
+  # docking starts ~1 s after the client is up to speed. Test 2 of the spec (MRV starts
+  # slower than the client, ~0.2 m gap, ~16 s of rendezvous):
+  #   --set "rendezvous.mrv_initial_velocity_mps=[0.015,0.0,0.0]" --set rendezvous.mrv_follow_during_release=false
+  mrv_initial_velocity_mps: []
+  mrv_follow_during_release: true
+  # true: no waiting states -- the docking starts at once, the release + MRV station keeping
+  # run next to the transport, and the matching / station gates below are checked right
+  # before the docking-axis approach. Spec's sequential states (Tests 1, 2):
+  #   --set rendezvous.concurrent_docking=false (+ the Test 1 / Test 2 overrides above)
+  concurrent_docking: true
+  # Forced insertion: from the pre-dock point on, the MEP always closes on the client along
+  # the docking axis at >= insertion_min_relative_speed_mps (no swing-settle wait; the
+  # depth reading is logged but does not hold the approach). It only re-aligns outside
+  # this wider corridor or closer than docking.min_wall_clearance_m to the nozzle wall;
+  # the FixedJoint still needs every docking.dock_* condition. false = the verified
+  # (settle + depth-gated) insertion.
+  forced_insertion: true
+  insertion_min_relative_speed_mps: 0.005
+  insertion_max_axis_deg: 12.0
+  insertion_max_lateral_m: 0.20
+  mrv_max_accel_mps2: 0.004
+  position_gain_hz: 0.25
+  max_correction_speed_mps: 0.02
+  max_mep_client_relative_velocity_mps: 0.005
+  max_mrv_client_relative_velocity_mps: 0.005
+  # MRV back on its verified station (the docking was verified with the MRV exactly there)
+  max_relative_position_m: 0.05
+  stable_duration_sec: 1.0
+  # Gate velocities = least-squares slope of the measured positions over this window
+  velocity_window_s: 0.5
+  # Added to the existing docking.* conditions while the client moves
+  dock_max_mrv_client_relative_velocity_mps: 0.005
+  dock_max_mep_client_relative_velocity_mps: 0.01
+  dock_max_relative_position_m: 0.1
+  chase_timeout_s: 30.0
+  velocity_match_timeout_s: 90.0
+  rendezvous_timeout_s: 90.0
+
+post_docking:
+  # true: DOCKED -> release the grip at once; the docked MEP + client stack stops by thrust
+  # (stop_* below) in the background while the MRV reverses from its current motion and
+  # departs along separation.direction -- no waiting states. false: STABILIZING -> STOPPING
+  # (all three stop) -> ROBOT_RELEASE -> ARM_RETREAT -> MRV_SEPARATION
+  immediate_release: true
+  # STABILIZING: the docked stack keeps drifting, MEP-client drift must stay small
+  stabilization_sec: 2.0
+  max_drift_mm: 5.0
+  max_drift_deg: 0.5
+  # STOPPING: common deceleration a = clip(-v / tau, a_max) as F = m a on client AND MEP;
+  # the MRV follows through its relative hold, so no joint takes the stopping load
+  stop_accel_mps2: 0.002
+  stop_time_constant_s: 3.0
+  stop_ang_accel_rad_s2: 0.001
+  stop_ang_time_constant_s: 3.0
+  stop_velocity_tolerance_mps: 0.001
+  stop_angular_tolerance_rad_s: 0.0005
+  stop_hold_sec: 1.0
+  stop_timeout_s: 90.0
+  # ROBOT_RELEASE: only the robot <-> MEP capture joint is removed; the MEP <-> client
+  # docking joint stays
+  release_wait_sec: 0.5
+  release_timeout_s: 5.0
+
+separation:
+  # ARM_RETREAT: the EE backs off the MEP face along its normal before the MRV moves
+  arm_retreat_distance_m: 0.6
+  arm_retreat_speed_mps: 0.03
+  arm_retreat_timeout_s: 90.0
+  # [] = auto: -normalize(client.linear_velocity_mps)
+  direction: []
+  velocity_mps: 0.02
+  accel_mps2: 0.004
+  duration_sec: 5.0
+  min_distance_increase_m: 0.1
+  max_contact_force_n: 50.0
+  timeout_s: 90.0

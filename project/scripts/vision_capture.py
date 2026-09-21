@@ -13,6 +13,9 @@ Must run with the Isaac Sim Python (the same interpreter `srb` uses):
     # Full pipeline -- MRV rendezvous (folded arm, two translation legs, arm deploy) + capture + docking
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --tag full_6dof --dock \
       --start_yaw_deg 15 --set mep.motion_mode=six_dof --set "mep.angular_velocity_rad_s=[0.005,-0.004,0.006]"
+    # Moving client -- the satellite drifts (+X 0.02 m/s), MRV + MEP match its velocity, dock
+    # while moving, stop, release the MEP, retreat the arm and depart (-X); --dock_only skips the capture
+    ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless --tag moving --dock_only --moving_dock
     # ... the same run without the rendezvous phase (the arm starts at the observation pose)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --dock --no_mrv_approach
     # GUI (debug draw + camera overlay images); after a success the simulation keeps
@@ -48,6 +51,10 @@ def parse_args():
                         help="Run the Ares1 probe -> satellite thruster docking phase after the capture (config `docking:`)")
     parser.add_argument("--dock_only", action="store_true",
                         help="--dock, but skip the capture: attach the MEP at its nominal grasp pose and dock straight away")
+    parser.add_argument("--moving_dock", action="store_true",
+                        help="--dock with a drifting client: release -> chase -> velocity matching -> rendezvous -> docking "
+                             "-> stop -> robot release -> arm retreat -> MRV departure (config `client:`, `rendezvous:`, "
+                             "`post_docking:`, `separation:`); combine with --dock_only to skip the capture")
     parser.add_argument("--no_mrv_approach", action="store_true",
                         help="Skip the MRV rendezvous phase (folded arm -> two translation legs -> arm deploy) "
                              "and start with the arm at the observation pose, as before (config `mrv:`)")
@@ -138,8 +145,10 @@ def main():
         sets.append("mrv.enabled=false")
     if args.mrv_approach:
         sets.append("mrv.enabled=true")
-    if args.dock or args.dock_only:
+    if args.dock or args.dock_only or args.moving_dock:
         sets.append("docking.enabled=true")
+    if args.moving_dock:
+        sets.append("client.release_enabled=true")
     if args.dock_only:
         sets.append("docking.skip_capture=true")
         # The docking-only path attaches the MEP at its nominal grasp pose in `start()`,

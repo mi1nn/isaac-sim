@@ -32,6 +32,13 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .frames import Frame, rotation_angle
+from .moving_dock import (
+    ClientMotionCfg,
+    PostDockingCfg,
+    RendezvousCfg,
+    SeparationCfg,
+    validate_moving_cfg,
+)
 from .mrv_approach import MrvApproachCfg, validate_mrv_cfg
 from .probe_dock import (
     DockingVisionCfg,
@@ -218,6 +225,13 @@ class LoggingVisionCfg:
     csv_enabled: bool = True
     overlay_every_sec: float = 1.0
     debug_draw: bool = True
+    # Moving client only (visual, no effect on physics or control): the path of the
+    # client / MEP / MRV as a trail of points, with a fixed cross at each start position,
+    # so a 20 mm/s drift is visible; and a GUI window with the live speeds (not headless)
+    motion_trail: bool = True
+    motion_trail_period_s: float = 1.0
+    motion_trail_max_points: int = 600
+    motion_hud: bool = True
 
 
 @dataclass
@@ -262,6 +276,13 @@ class VisionCaptureConfig:
     docking: DockingVisionCfg = field(default_factory=DockingVisionCfg)
     # RGB-D camera on the Ares1 probe (docking phase)
     probe_camera: ProbeCameraCfg = field(default_factory=ProbeCameraCfg)
+    # Moving-client scenario (`moving_dock.py`): client release -> chase -> velocity
+    # matching -> rendezvous -> docking -> stop -> release -> arm retreat -> departure.
+    # Off unless `client.release_enabled` (`vision_capture.py --moving_dock`).
+    client: ClientMotionCfg = field(default_factory=ClientMotionCfg)
+    rendezvous: RendezvousCfg = field(default_factory=RendezvousCfg)
+    post_docking: PostDockingCfg = field(default_factory=PostDockingCfg)
+    separation: SeparationCfg = field(default_factory=SeparationCfg)
 
     def to_dict(self) -> dict:
         def conv(obj):
@@ -323,6 +344,11 @@ def load_vision_config(path: Optional[str | Path] = None, overrides: Sequence[st
     validate_mrv_cfg(cfg.mrv)
     validate_docking_cfg(cfg.docking)
     validate_probe_camera_cfg(cfg.probe_camera)
+    validate_moving_cfg(cfg.client, cfg.rendezvous, cfg.post_docking, cfg.separation)
+    if cfg.logging.motion_trail_period_s <= 0.0 or int(cfg.logging.motion_trail_max_points) < 2:
+        raise ValueError("logging.motion_trail_period_s must be > 0 and motion_trail_max_points >= 2")
+    if cfg.client.release_enabled and not cfg.docking.enabled:
+        raise ValueError("client.release_enabled (moving-client docking) requires docking.enabled")
     if cfg.ros.publish_rate_hz <= 0.0 or not cfg.ros.namespace.strip("/"):
         raise ValueError("ros.publish_rate_hz must be > 0 and ros.namespace must not be empty")
     cfg.ros.namespace = cfg.ros.namespace.strip("/")

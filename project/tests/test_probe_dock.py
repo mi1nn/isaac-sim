@@ -310,3 +310,25 @@ def test_docking_speed_and_transport_validation():
         load_vision_config(overrides=["docking.transport_speed_mps=0.01"])  # slower than the approach
     c = load_vision_config(overrides=["docking.transport_speed_mps=0.2"])
     assert c.docking.transport_speed_mps == 0.2
+
+
+def test_depth_calibration_only_on_the_docking_axis(cfg):
+    base = {"depth_raw": 3.0, "depth_pixels": 81.0, "lateral": 0.005, "axis_deg": 0.2}
+    assert pd.depth_calibration_sample_ok(cfg, base)[0]
+    # 41 mm off the axis passed the 50 mm alignment gate but put the ray on another
+    # surface (constant 320 mm disagreement on the axis afterwards): rejected here
+    ok, why = pd.depth_calibration_sample_ok(cfg, {**base, "lateral": 0.041})
+    assert not ok and "lateral" in why
+    assert not pd.depth_calibration_sample_ok(cfg, {**base, "axis_deg": cfg.depth_calibration_max_axis_deg + 0.1})[0]
+    assert not pd.depth_calibration_sample_ok(cfg, {**base, "depth_raw": math.nan})[0]
+    assert not pd.depth_calibration_sample_ok(cfg, {**base, "depth_pixels": 0.0})[0]
+    # tighter than the (YAML) alignment gate, which let the 41 mm calibration through
+    yaml_cfg = load_vision_config().docking
+    assert yaml_cfg.depth_calibration_max_lateral_m < yaml_cfg.align_lateral_m
+
+
+def test_depth_calibration_config_validation():
+    with pytest.raises(ValueError):
+        load_vision_config(overrides=["docking.depth_calibration_samples=0"])
+    with pytest.raises(ValueError):
+        load_vision_config(overrides=["docking.depth_calibration_max_lateral_m=0"])
