@@ -293,3 +293,4 @@ Thumbs.db
 # Firebase service account keys (never commit)
 serviceAccount*.json
 *-firebase-adminsdk-*.json
+.vscode/settings.json
