@@ -41,6 +41,15 @@ TERMINAL_STATES = {
 }
 # Docking done and held: the demo keeps running, the session is complete
 FINISHED_STATES = {"DOCK_HOLDING"}
+# MRV rendezvous / arm deployment: neither capture nor docking (telemetry phase "MISSION")
+MISSION_STATES = {"MRV_MOVE_STEP_1", "MRV_STEP_1_REACHED", "MRV_MOVE_STEP_2", "MRV_STEP_2_REACHED", "ARM_DEPLOY"}
+# Terminal failure state -> stage of the mission it belongs to (`failure_stage`)
+FAILURE_STAGES = {
+    "TAG_LOST": "VISION", "POSE_INVALID": "VISION", "PREDICTION_INVALID": "VISION",
+    "APPROACH_TIMEOUT": "APPROACH", "MRV_APPROACH_FAILED": "APPROACH",
+    "CAPTURE_FAILED": "CAPTURE", "DOCK_FAILED": "DOCKING",
+    "PHYSICS_ERROR": "PHYSICS", "ABORTED": "ABORTED",
+}
 
 
 def _num(x) -> Optional[float]:
@@ -182,6 +191,18 @@ class SessionRecorder:
         self._status_captured = False
         self.docked = False
         self.contact_vel: Optional[float] = None
+        self.dock_enabled = False  # the run includes the docking phase (`--dock`)
+        self.docking_started = False
+        self.docking_success = False
+        self.capture_metrics: Dict[str, Optional[float]] = {}  # est_* at the moment of contact
+        self.capture_time: Optional[float] = None
+        self.dock_t0: Optional[float] = None
+        self.dock_t_end: Optional[float] = None  # sim time of the docking joint
+        # Latest docking metrics (frozen once docked, so the holding phase does not overwrite the result)
+        self.last_docking_metrics: Dict[str, Optional[float]] = {
+            "relative_x": None, "relative_y": None, "relative_z": None, "lateral_error": None, "orientation_error": None,
+            "insertion_depth": None, "relative_speed": None,
+        }
         self.seq = 0
         self.last_row_t = -math.inf
         self.last_status: Dict[str, Any] = {}
@@ -216,14 +237,35 @@ class SessionRecorder:
         # Compare with the previous /status, not with /captured (that topic arrives first)
         if self.captured and not self._status_captured:
             self.contact_vel = _num(s.get("est_rel_vel"))  # impact speed at the moment of contact
+            self.capture_time = t
+            self.capture_metrics = {k: _num(s.get(f"est_{k}")) for k in ("distance", "lateral", "orientation", "rel_vel")}
         self._status_captured = self.captured
-        self.docked = self.docked or bool(s.get("dock_docked"))
+        self._track_docking(t, s)
         self.last_status = {**s, "sim_time_s": t, "state": state}
         if t - self.last_row_t >= self.period - 1e-9 or terminal:
             self.last_row_t = t
             self._write_row(t, state, s)
         if terminal:
             self.finish()
+
+    def _track_docking(self, t: float, s: Dict[str, Any]):
+        self.dock_enabled = self.dock_enabled or bool(s.get("dock_enabled"))
+        docked = bool(s.get("dock_docked"))
+        if s.get("dock_active"):
+            self.dock_enabled = True
+            if not self.docking_started:
+                self.docking_started, self.dock_t0 = True, t
+            if not self.docking_success:  # frozen from the moment the joint exists
+                self.last_docking_metrics = {
+                    "relative_x": _num(s.get("dock_relative_x")), "relative_y": _num(s.get("dock_relative_y")),
+                    "relative_z": _num(s.get("dock_relative_z")), "lateral_error": _num(s.get("dock_lateral")),
+                    "orientation_error": _num(s.get("dock_orientation_deg")),
+                    "insertion_depth": _num(s.get("dock_insertion_depth")), "relative_speed": _num(s.get("dock_rel_speed")),
+                }
+                if docked:
+                    self.dock_t_end = t
+        self.docking_success = self.docking_success or docked
+        self.docked = self.docking_success
 
     ## Session lifecycle
     def _new_id(self) -> str:
@@ -239,13 +281,21 @@ class SessionRecorder:
             "session_id": self.session_id,
             "created_at": "__SERVER_TIMESTAMP__",
             "is_running": True,
-            "is_success": None, "failure_reason": None, "duration_sec": None,
+            "capture_success": None, "docking_success": None, "mission_success": None,
+            "failure_stage": None, "failure_reason": None, "duration_sec": None,
             "final_distance_m": None, "final_angle_deg": None, "contact_vel_mps": None,
+            "capture_position_error_m": None, "capture_lateral_error_m": None, "capture_orientation_error_deg": None,
+            "capture_contact_velocity_mps": None, "capture_time_s": None,
+            "docking_position_error_m": None, "docking_lateral_error_m": None, "docking_orientation_error_deg": None,
+            "docking_insertion_depth_m": None, "docking_relative_velocity_mps": None, "docking_time_s": None,
         })
         print(f"[DB] session {self.session_id} started", flush=True)
 
     def _reset_latest_keep_clock(self):
         self.seq, self.last_row_t, self.contact_vel, self._status_captured, self.docked = 0, -math.inf, None, False, False
+        self.dock_enabled = self.docking_started = self.docking_success = False
+        self.capture_metrics, self.capture_time, self.dock_t0, self.dock_t_end = {}, None, None, None
+        self.last_docking_metrics = dict.fromkeys(self.last_docking_metrics)
 
     def _write_row(self, t: float, state: Optional[str], s: Dict[str, Any]):
         docking = bool(s.get("dock_active"))
@@ -273,8 +323,10 @@ class SessionRecorder:
             p = pose(key)
             return {f"{prefix}_{a}": (_num(v) if p else None) for a, v in zip("xyz", p or (None,) * 3)}
 
+        phase = "DOCKING" if docking else "MISSION" if state in MISSION_STATES else "CAPTURE"
+        dock = lambda key, k=1.0: _scale(s.get(key), k) if docking else None  # noqa: E731
         row = {
-            "session_id": self.session_id, "sim_time": t, "state": state,
+            "session_id": self.session_id, "sim_time": t, "state": state, "phase": phase,
             **xyz("ee", "ee"), **xyz("gt", "target"), **xyz("goal", "goal"), **xyz("est", "est"),
             **xyz("probe", "probe"), **xyz("dock", "dock"),
             **errors,
@@ -285,6 +337,13 @@ class SessionRecorder:
             "insertion_depth_m": _num(s.get("dock_insertion_depth")) if docking else None,
             "wall_clearance_mm": _scale(s.get("dock_clearance"), 1000.0) if docking else None,
             "is_docked": bool(s.get("dock_docked")) if docking else False,
+            "dock_relative_x_m": dock("dock_relative_x"), "dock_relative_y_m": dock("dock_relative_y"),
+            "dock_relative_z_m": dock("dock_relative_z"),
+            "dock_lateral_error_m": dock("dock_lateral"), "dock_orientation_error_deg": dock("dock_orientation_deg"),
+            "dock_geometry_distance_m": dock("dock_distance"), "dock_insertion_depth_m": dock("dock_insertion_depth"),
+            "dock_relative_speed_mps": dock("dock_rel_speed"),
+            "dock_ready": bool(s.get("dock_ready")) if docking else False,
+            "dock_success": bool(s.get("dock_docked")) if docking else False,
         }
         self.sink.set(f"{SESSIONS}/{self.session_id}/{TELEMETRY}/{self.seq:07d}", {"id": self.seq, **row})
         self.seq += 1
@@ -295,19 +354,41 @@ class SessionRecorder:
             return
         s = self.last_status
         failure = s.get("failure")
+        capture_success = bool(self.captured)
+        docking_success = bool(self.docking_success)
+        # A capture-only run (no `--dock`) has no docking to fail: docking_success stays null, mission = capture
+        mission_success = capture_success and (docking_success if self.dock_enabled else True)
+        cm, dm = self.capture_metrics, self.last_docking_metrics
+        dock_xyz = [dm.get(k) for k in ("relative_x", "relative_y", "relative_z")]
+        dock_pos = math.sqrt(sum(v * v for v in dock_xyz)) if all(v is not None for v in dock_xyz) else None
+        dock_end = self.dock_t_end if self.dock_t_end is not None else _num(s.get("sim_time_s"))
         self.sink.set(f"{SESSIONS}/{self.session_id}", {
             "is_running": False,
             "duration_sec": _num(s.get("sim_time_s")),
-            "is_success": bool(self.captured),
+            "capture_success": capture_success,
+            "docking_success": docking_success if self.dock_enabled else None,
+            "mission_success": mission_success,
+            "failure_stage": FAILURE_STAGES.get(str(failure).split(":")[0]) if failure else None,
             "failure_reason": failure if failure else None,
+            "capture_position_error_m": cm.get("distance"),
+            "capture_lateral_error_m": cm.get("lateral"),
+            "capture_orientation_error_deg": cm.get("orientation"),
+            "capture_contact_velocity_mps": self.contact_vel,
+            "capture_time_s": self.capture_time,
+            "docking_position_error_m": dock_pos,
+            "docking_lateral_error_m": dm.get("lateral_error"),
+            "docking_orientation_error_deg": dm.get("orientation_error"),
+            "docking_insertion_depth_m": dm.get("insertion_depth"),
+            "docking_relative_velocity_mps": dm.get("relative_speed"),
+            "docking_time_s": (dock_end - self.dock_t0) if self.dock_t0 is not None and dock_end is not None else None,
             "final_distance_m": _num(s.get("dock_distance" if s.get("dock_active") else "est_distance")),
             "final_angle_deg": _num(s.get("dock_axis_deg" if s.get("dock_active") else "est_orientation")),
             "contact_vel_mps": self.contact_vel,
             "final_state": s.get("state"),
-            "is_docked": bool(s.get("dock_docked")) if s.get("dock_active") else self.docked,
+            "is_docked": docking_success,
         }, merge=True)
         self.sink.flush()
-        print(f"[DB] session {self.session_id} finished: captured={self.captured} failure={failure}", flush=True)
+        print(f"[DB] session {self.session_id} finished: capture={capture_success} docking={docking_success} mission={mission_success} failure={failure}", flush=True)
         self.session_id = None
 
     def check_idle(self):

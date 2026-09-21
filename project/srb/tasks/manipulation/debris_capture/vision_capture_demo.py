@@ -2419,10 +2419,15 @@ class VisionCaptureDemo:
             "start_received": self.ros.start_received, "failure": self.results.failure,
             **{f"est_{k}": val for k, val in m.items()},
             # Docking phase (probe tip -> SAT_DOCK_POINT); the est_* capture metrics above no longer apply then
+            "dock_enabled": bool(self.cfg.docking.enabled),  # false: a capture-only run, mission success = capture success
             "dock_active": docking,
+            "dock_ready": self.state == State.DOCK_READY,
             **({"dock_distance": dm["geometry_distance"], "dock_lateral": dm["lateral"], "dock_axis_deg": dm["axis_deg"],
                 "dock_roll_deg": dm["roll_deg"], "dock_rel_speed": dm["rel_speed"], "dock_insertion_depth": dm["insertion_depth"],
-                "dock_clearance": dm["clearance"], "dock_docked": bool(self.task.docking.is_docked)} if dm is not None else {}),
+                "dock_clearance": dm["clearance"], "dock_docked": bool(self.task.docking.is_docked),
+                # probe tip -> SAT_DOCK_POINT error in the dock frame [m] and the full orientation error
+                "dock_relative_x": dm["e_x"], "dock_relative_y": dm["e_y"], "dock_relative_z": dm["e_z"],
+                "dock_orientation_deg": dm["orientation_deg"]} if dm is not None else {}),
         })
 
     def status(self):
