@@ -289,3 +289,7 @@ Thumbs.db
 *.swo
 .vscode/
 .idea/
+
+# Firebase service account keys (never commit)
+serviceAccount*.json
+*-firebase-adminsdk-*.json
