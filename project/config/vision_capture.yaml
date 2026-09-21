@@ -141,7 +141,7 @@ approach:
   final_gap_m: 0.05
   # was 0.10 (+10 %, demo time; NEEDS_ISAAC_VALIDATION). Only the far leg to the standoff;
   # speed_near / speed_capture_range are unchanged
-  speed_far_mps: 0.11
+  speed_far_mps: 0.10
   speed_near_mps: 0.04
   speed_capture_range_mps: 0.01
   near_distance_m: 0.30   # standoff below which `speed_near` applies
@@ -183,11 +183,11 @@ test:
   static_standoffs_m: [0.7, 0.4, 0.2]
   static_samples: 30
   dynamic_timeout_sec: 60.0
-  holding_duration_sec: 10.0
+  holding_duration_sec: 2.0
   holding_max_relative_drift_mm: 5.0
   holding_max_relative_drift_deg: 0.5
   # After holding, slowly back the EE off along the face normal with the MEP attached
-  retreat_distance_m: 0.2
+  retreat_distance_m: 0.0
   retreat_speed_mps: 0.01
 
 logging:
@@ -239,15 +239,15 @@ docking:
   pre_dock_distance_m: 1.0
 
   # Alignment gate, measured in the dock frame before any insertion
-  align_lateral_m: 0.01
-  align_axis_deg: 0.5
-  align_roll_deg: 1.0
+  align_lateral_m: 0.05
+  align_axis_deg: 3.0
+  align_roll_deg: 5.0
   align_hold_s: 0.5
   # The probe tip must also be at rest before inserting (max displacement over the window)
   # At least half of the arm + payload period (~20 s): a short window is satisfied at
   # every turning point of an oscillation that is still running
-  settle_window_s: 12.0
-  settle_window_m: 0.008
+  settle_window_s: 3.0
+  settle_window_m: 0.05
 
   # Transport to the pre-dock pose (free space): the probe tip has to be swung about
   # 4.8 m sideways (5.5 m before the dock_offset change) onto the thruster axis, so this
@@ -257,26 +257,28 @@ docking:
   # Now 0.11 m/s (+10 %, demo time; NEEDS_ISAAC_VALIDATION: 0.10 is the verified value).
   # The sideways distance is also shorter: the satellite is placed with
   # dock_offset (0, 4.8, 0) m instead of (0, 5.5, 0) m (`vision_task.py`, VISION_DOCK_OFFSET_M)
-  transport_speed_mps: 0.11
+  transport_speed_mps: 0.15
 
   # Docking-axis approach: fast far away, controlled near, slow for the insertion
   # (far leg only, was 0.10; near / insertion / align speeds are unchanged)
-  approach_speed_mps: 0.11
-  slow_zone_m: 0.30
-  near_speed_mps: 0.03
-  insertion_zone_m: 0.10
-  insertion_speed_mps: 0.01
+  approach_speed_mps: 0.15
+  slow_zone_m: 0.20
+  near_speed_mps: 0.07
+  insertion_zone_m: 0.06
+  insertion_speed_mps: 0.03
   # Slow on purpose: a correction finished in much less than the arm + 3 t payload period
   # (~20 s) re-excites that mode and the residual swing then sits on the alignment gate
-  align_speed_mps: 0.008
-  align_speed_deg_s: 1.0
+  align_speed_mps: 0.015
+  align_speed_deg_s: 2.0
   # Continuous deceleration (v <= decel_gain_hz * remaining distance, min creep_speed_mps)
   # instead of an on/off target: stopping the reference abruptly rings the lightly damped
   # arm + 3 t payload mode (period ~20 s)
-  decel_gain_hz: 0.05
-  creep_speed_mps: 0.002
+  decel_gain_hz: 0.08
+  # docking-axis (z) approach only (`decel_gain_hz` still applies to transport / alignment)
+  z_decel_gain_hz: 0.3
+  creep_speed_mps: 0.005
   # Ramp-up limit [m/s^2]: stepping the commanded speed kicks the 3 t payload sideways
-  accel_mps2: 0.005
+  accel_mps2: 0.01
   # Active damping of the arm + 3 t payload swing (0 disables): the joint velocity target
   # is biased against the measured probe-tip velocity error
   # (Tried at 1.0: destabilised the arm within 0.1 s, the drives already have a large
@@ -286,15 +288,15 @@ docking:
   joint_target_windup: 5.0
   # Closed loop: forward motion stops and the demo re-aligns when the alignment leaves
   # these (wider than the gate above, so a resumed approach does not abort at once)
-  approach_abort_lateral_m: 0.02
-  approach_abort_axis_deg: 1.5
+  approach_abort_lateral_m: 0.08
+  approach_abort_axis_deg: 6.0
 
   # Docking conditions -- all of them must hold before the FixedJoint is created
-  dock_axial_m: 0.01
-  dock_radial_m: 0.01
-  dock_axis_deg: 0.5
-  dock_roll_deg: 1.0
-  max_relative_velocity_mps: 0.02
+  dock_axial_m: 0.04
+  dock_radial_m: 0.04
+  dock_axis_deg: 2.0
+  dock_roll_deg: 4.0
+  max_relative_velocity_mps: 0.05
   min_wall_clearance_m: 0.02
 
   # `cam_probe` depth: distance_to_image_plane along the docking axis, compared with

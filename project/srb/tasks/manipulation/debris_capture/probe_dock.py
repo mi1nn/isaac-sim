@@ -89,6 +89,8 @@ class DockingVisionCfg:
     # never below `creep`. Stop-and-go of the reference excites the lightly damped
     # arm + 3 t payload mode (period ~20 s), which a straight rate limit cannot settle.
     decel_gain_hz: float = 0.05
+    # Docking-axis (z) approach only: faster deceleration profile than `decel_gain_hz`
+    z_decel_gain_hz: float = 0.3
     creep_speed_mps: float = 0.002
     # Ramp-up limit [m/s^2]. Stepping the commanded speed from 0 to the approach speed
     # kicks the 3 t payload sideways (measured: +-20 mm within 1 s of starting the Z
@@ -297,13 +299,13 @@ def ramped(cfg: DockingVisionCfg, current: float, target: float, dt: float) -> f
     return float(min(target, current + cfg.accel_mps2 * dt))
 
 
-def decelerated(cfg: DockingVisionCfg, speed: float, distance: float) -> float:
+def decelerated(cfg: DockingVisionCfg, speed: float, distance: float, gain_hz: float = None) -> float:
     """`speed`, capped by a constant-deceleration profile towards `distance` [m].
 
     Keeps the commanded velocity continuous down to zero distance, so the arm is not
     stepped at the end of a motion (which rings the lightly damped arm+payload mode).
     """
-    return float(min(speed, max(cfg.creep_speed_mps, cfg.decel_gain_hz * max(0.0, distance))))
+    return float(min(speed, max(cfg.creep_speed_mps, (cfg.decel_gain_hz if gain_hz is None else gain_hz) * max(0.0, distance))))
 
 
 def settled(history: Sequence[Tuple[float, np.ndarray]], now: float, window_s: float, window_m: float) -> bool:

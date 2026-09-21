@@ -1638,7 +1638,7 @@ class VisionCaptureDemo:
         self._dock["commanded_speed"] = self._dock_speed
         goal = probe_dock.tip_goal(self.dock_world(), axial_cmd)
         step = self.cfg.approach.max_joint_step_rad if not final else 0.5 * self.cfg.approach.max_joint_step_rad
-        self.track_probe(goal, probe_dock.decelerated(d, speed, remaining) if speed > 0.0 else 1e-9, max_step=step)
+        self.track_probe(goal, probe_dock.decelerated(d, speed, remaining, d.z_decel_gain_hz) if speed > 0.0 else 1e-9, max_step=step)
         self._dock["min_clearance"] = min(float(self._dock.get("min_clearance", math.inf)), m["clearance"]) if m["insertion_depth"] > 0.0 else self._dock.get("min_clearance", math.inf)
         self._dock["max_lateral_inserting"] = max(float(self._dock.get("max_lateral_inserting", 0.0)), m["lateral"]) if m["insertion_depth"] > 0.0 else self._dock.get("max_lateral_inserting", 0.0)
         if not final and remaining <= d.insertion_zone_m:
