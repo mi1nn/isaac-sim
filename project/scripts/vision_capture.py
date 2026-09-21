@@ -10,9 +10,9 @@ Must run with the Isaac Sim Python (the same interpreter `srb` uses):
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless
     # 6-DoF -- XYZ drift + combined roll/pitch/yaw rate (mep.angular_velocity_rad_s)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless --tag six_dof --set mep.motion_mode=six_dof
-    # Full pipeline -- MRV rendezvous (folded arm, two translation legs, arm deploy) + capture + docking
-    ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --tag full_6dof --dock \
-      --start_yaw_deg 15 --set mep.motion_mode=six_dof --set "mep.angular_velocity_rad_s=[0.005,-0.004,0.006]"
+    # Full pipeline (the default: 6-DoF MEP, start yaw 15 deg, MRV rendezvous + capture + docking, ROS 2 on,
+    # tag full_6dof) -- --no_dock / --no_ros / --start_yaw_deg 0 / --tag NAME switch those off or change them
+    ~/isaac-sim/python.sh project/scripts/vision_capture.py
     # ... the same run without the rendezvous phase (the arm starts at the observation pose)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --dock --no_mrv_approach
     # GUI (debug draw + camera overlay images); after a success the simulation keeps
@@ -45,7 +45,8 @@ def parse_args():
     parser.add_argument("--exit_when_done", action="store_true",
                         help="GUI: close the app when the scenario ends (default: after a success the simulation keeps running until the window is closed)")
     parser.add_argument("--dock", action="store_true",
-                        help="Run the Ares1 probe -> satellite thruster docking phase after the capture (config `docking:`)")
+                        help="Run the Ares1 probe -> satellite thruster docking phase after the capture (default: on, config `docking:`)")
+    parser.add_argument("--no_dock", action="store_true", help="Capture only: skip the docking phase")
     parser.add_argument("--dock_only", action="store_true",
                         help="--dock, but skip the capture: attach the MEP at its nominal grasp pose and dock straight away")
     parser.add_argument("--no_mrv_approach", action="store_true",
@@ -55,8 +56,9 @@ def parse_args():
                         help="Force the MRV rendezvous phase on even if `mrv.enabled` is false in the config")
     parser.add_argument("--start_yaw_deg", type=float, default=None, metavar="DEG",
                         help="Start the arm swung DEG degrees in azimuth (about its base axis) so it has to search for the MEP")
+    parser.add_argument("--no_ros", action="store_true", help="Disable the ROS 2 interface (default: on)")
     parser.add_argument("--ros", action="store_true",
-                        help="Enable the ROS 2 interface (telemetry topics + cmd/start, cmd/abort, cmd/capture_enable; see config `ros:`)")
+                        help="Enable the ROS 2 interface (default: on) (telemetry topics + cmd/start, cmd/abort, cmd/capture_enable; see config `ros:`)")
     parser.add_argument("--ros_wait_start", action="store_true", help="With --ros: hold the arm until a cmd/start message arrives")
     parser.add_argument("--start_paused", action="store_true", help="Wait for Play in the toolbar before starting")
     parser.add_argument("--kit_args", type=str, default=None,
@@ -72,7 +74,8 @@ def ensure_ros2_env(args):
     """The Isaac Sim ROS 2 bridge libraries must be on LD_LIBRARY_PATH before the process
     starts (setting it later does not affect the dynamic loader): re-exec once with the
     environment the bridge needs."""
-    wants_ros = args.ros or args.ros_wait_start or any(x.replace(" ", "") == "ros.enabled=true" for x in args.sets)
+    ros_off = args.no_ros or any(x.replace(" ", "") == "ros.enabled=false" for x in args.sets)
+    wants_ros = args.ros or args.ros_wait_start or not ros_off
     if not wants_ros or os.environ.get("MRV_ROS_ENV_READY") == "1":
         return
     isaac_path = os.environ.get("ISAAC_PATH", os.path.expanduser("~/isaac-sim"))
@@ -138,14 +141,20 @@ def main():
         sets.append("mrv.enabled=false")
     if args.mrv_approach:
         sets.append("mrv.enabled=true")
-    if args.dock or args.dock_only:
+    if args.dock and args.no_dock:
+        sys.exit("[ARGS] --dock and --no_dock are mutually exclusive")
+    if args.no_dock:
+        sets.append("docking.enabled=false")
+    elif args.dock or args.dock_only:
         sets.append("docking.enabled=true")
     if args.dock_only:
         sets.append("docking.skip_capture=true")
         # The docking-only path attaches the MEP at its nominal grasp pose in `start()`,
         # so there is no capture to approach and the rendezvous phase has no purpose
         sets.append("mrv.enabled=false")
-    if args.ros or args.ros_wait_start:
+    if args.no_ros:
+        sets.append("ros.enabled=false")
+    elif args.ros or args.ros_wait_start:
         sets.append("ros.enabled=true")
     if args.ros_wait_start:
         sets.append("ros.require_start_cmd=true")
@@ -153,6 +162,9 @@ def main():
         # Test 1: the MEP is at rest (no drift, no rotation)
         sets.append("mep.linear_velocity_mps=0.0")
         sets.append("mep.motion_mode=translation_only")
+        # ... capture only, from the observation pose (the full-pipeline defaults do not apply)
+        sets.append("docking.enabled=false")
+        sets.append("approach.start_yaw_offset_deg=0.0")
         # ... and it is a pose-accuracy measurement, not a demo: the arm starts at the
         # observation pose as it always has (--mrv_approach forces the phase back on)
         if not args.mrv_approach:
@@ -174,7 +186,7 @@ def main():
         if args.start_paused:
             sim.pause()
             print("[DEMO] PAUSED - press Play in the Isaac Sim toolbar to start", flush=True)
-        tag = args.tag or args.scenario
+        tag = args.tag or ("full_6dof" if args.scenario == "dynamic" else args.scenario)
         csv_path = out_dir / f"{tag}_metrics.csv"
         demo = VisionCaptureDemo(env, launcher.app, args.scenario, args.headless, out_dir, csv_path, label=tag)
         results = demo.run()

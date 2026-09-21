@@ -12,7 +12,7 @@ mep:
   # translation_only: Phase 1 linear drift (angular_velocity_rad_s is NOT applied)
   # six_dof:          XYZ drift + combined roll/pitch/yaw rate (angular_velocity_rad_s)
   #   ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --set mep.motion_mode=six_dof
-  motion_mode: translation_only
+  motion_mode: six_dof
   # Linear velocity [m/s] (world, MEP centre of mass) = drift_direction * linear_velocity_mps
   # = [vx, vy, vz] = [0.0, -0.008, 0.006] m/s with the values below
   linear_velocity_mps: 0.01
@@ -123,8 +123,8 @@ approach:
   observe_distance_m: 0.6
   # Start the arm swung about its base axis (azimuth) by this angle [deg]: the wrist camera
   # then does not see the MEP and SEARCH swings the arm back until the tags are seen.
-  # 0: start at the observation pose. (`--start_yaw_deg 15` on the command line)
-  start_yaw_offset_deg: 0.0
+  # 0: start at the observation pose. (default 15; `--start_yaw_deg 0` on the command line for the observation pose)
+  start_yaw_offset_deg: 15.0
   # SEARCH swing speed (arm without payload). The normal 5 cm tracking-lag gate caps it at
   # ~80 mm/s with the overdamped Canadarm3 drives, hence the wider gate / joint step here.
   # 0.25 / 0.20 / 0.08 was run: ~230 mm/s, tags found in 4.1 s from a 15 deg start. A more
@@ -201,13 +201,13 @@ logging:
   debug_draw: true
 
 ros:
-  # ROS 2 interface (rclpy). Off by default; `vision_capture.py --ros` turns it on.
+  # ROS 2 interface (rclpy). On by default; `vision_capture.py --no_ros` (or --set ros.enabled=false) turns it off.
   # Topics (all under /<namespace>/):
   #   out:  cam_wrist/image_raw, cam_wrist/camera_info, estimate/cylinder_pose,
   #         predicted/cylinder_pose, estimate/mep_twist, ee/pose, ee/target_pose,
   #         gt/cylinder_pose, gt/mep_twist (evaluation only), state, captured, status, /tf
   #   in:   cmd/start (Empty), cmd/abort (Empty), cmd/capture_enable (Bool)
-  enabled: false
+  enabled: true
   node_name: mrv_vision_capture
   namespace: mrv
   world_frame: world
@@ -282,10 +282,10 @@ mrv:
 
 docking:
   # Phase 2: the captured MEP's Ares1 probe is docked into the satellite thruster.
-  # Off by default; `vision_capture.py --dock` turns it on. Frames come from
+  # On by default; `vision_capture.py --no_dock` turns it off. Frames come from
   # `docking.py` (PROBE_DOCK_POINT = probe tip, SAT_DOCK_POINT = `dock_depth` inside
   # the nozzle); all errors are expressed in the satellite dock frame, never world XYZ.
-  enabled: false
+  enabled: true
   # true: skip the AprilTag capture and start with the MEP attached at its nominal grasp
   # pose (docking iteration speed; capture itself is covered by the other scenarios)
   skip_capture: false

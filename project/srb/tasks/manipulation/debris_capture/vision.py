@@ -60,7 +60,7 @@ class MepVisionCfg:
     mass_kg: float = 3000.0
     # "translation_only" (Phase 1: no rotation, angular_velocity_rad_s is not applied)
     # or "six_dof" (XYZ drift + combined roll/pitch/yaw rate)
-    motion_mode: str = "translation_only"
+    motion_mode: str = "six_dof"
     # Linear velocity [m/s] (world) = drift_direction (unit) * linear_velocity_mps
     linear_velocity_mps: float = 0.01
     drift_direction: List[float] = field(default_factory=lambda: [0.0, -0.8, 0.6])
@@ -152,7 +152,7 @@ class ApproachCfg:
     # at the observation pose: the wrist camera then does not look at the MEP, and the
     # SEARCH state has to swing the arm back until the AprilTags come into view.
     # 0: start exactly at the observation pose.
-    start_yaw_offset_deg: float = 0.0
+    start_yaw_offset_deg: float = 15.0
     # SEARCH swing (only when the arm starts off the observation pose). The normal
     # tracking gate stops the reference as soon as the arm lags it by 5 cm, which with
     # the overdamped Canadarm3 drives (lag = v * 0.625 s) caps the speed at ~80 mm/s.
@@ -225,7 +225,7 @@ class RosVisionCfg:
     """Optional ROS 2 interface (`ros_interface.py`): telemetry out, start / abort /
     capture-enable commands in. Off by default; `vision_capture.py --ros` switches it on."""
 
-    enabled: bool = False
+    enabled: bool = True
     node_name: str = "mrv_vision_capture"
     # Every topic lives under /<namespace>/ (no leading slash)
     namespace: str = "mrv"

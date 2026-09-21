@@ -39,6 +39,8 @@ TERMINAL_STATES = {
     "SUCCESS", "TAG_LOST", "POSE_INVALID", "PREDICTION_INVALID", "APPROACH_TIMEOUT", "CAPTURE_FAILED",
     "PHYSICS_ERROR", "ABORTED", "DOCK_FAILED", "MRV_APPROACH_FAILED",
 }
+# Docking done and held: the demo keeps running, the session is complete
+FINISHED_STATES = {"DOCK_HOLDING"}
 
 
 def _num(x) -> Optional[float]:
@@ -174,10 +176,11 @@ class SessionRecorder:
         self._reset_latest()
 
     def _reset_latest(self):
-        self.poses: Dict[str, Optional[tuple]] = {"ee": None, "gt": None, "goal": None, "est": None}
+        self.poses: Dict[str, Optional[tuple]] = {"ee": None, "gt": None, "goal": None, "est": None, "probe": None, "dock": None}
         self.state: Optional[str] = None
         self.captured = False
         self._status_captured = False
+        self.docked = False
         self.contact_vel: Optional[float] = None
         self.seq = 0
         self.last_row_t = -math.inf
@@ -200,7 +203,7 @@ class SessionRecorder:
         t = _num(s.get("sim_time_s"))
         if t is None:
             return
-        terminal = state in TERMINAL_STATES
+        terminal = state in TERMINAL_STATES or state in FINISHED_STATES
         # A new run (simulator restarted): the clock goes back, or a live state follows a finished session
         if self.session_id is not None and t < self.last_status.get("sim_time_s", 0.0) - 1.0:
             self.finish()
@@ -214,6 +217,7 @@ class SessionRecorder:
         if self.captured and not self._status_captured:
             self.contact_vel = _num(s.get("est_rel_vel"))  # impact speed at the moment of contact
         self._status_captured = self.captured
+        self.docked = self.docked or bool(s.get("dock_docked"))
         self.last_status = {**s, "sim_time_s": t, "state": state}
         if t - self.last_row_t >= self.period - 1e-9 or terminal:
             self.last_row_t = t
@@ -241,22 +245,46 @@ class SessionRecorder:
         print(f"[DB] session {self.session_id} started", flush=True)
 
     def _reset_latest_keep_clock(self):
-        self.seq, self.last_row_t, self.contact_vel, self._status_captured = 0, -math.inf, None, False
+        self.seq, self.last_row_t, self.contact_vel, self._status_captured, self.docked = 0, -math.inf, None, False, False
 
     def _write_row(self, t: float, state: Optional[str], s: Dict[str, Any]):
+        docking = bool(s.get("dock_active"))
+        if docking:
+            # Docking phase: the est_* capture metrics (EE vs cylinder) no longer apply. The error columns carry the
+            # probe tip -> SAT_DOCK_POINT errors, and the vision estimate / capture goal (frozen since capture) are null.
+            errors = {
+                "distance_m": _num(s.get("dock_distance")),  # remaining insertion distance
+                "lateral_error_mm": _scale(s.get("dock_lateral"), 1000.0),
+                "angle_error_deg": _num(s.get("dock_axis_deg")),  # probe axis vs docking axis
+                "rel_vel_mps": _num(s.get("dock_rel_speed")),
+            }
+            poses = {"est": None, "goal": None}
+        else:
+            errors = {
+                "distance_m": _num(s.get("est_distance")),
+                "lateral_error_mm": _scale(s.get("est_lateral"), 1000.0),
+                "angle_error_deg": _num(s.get("est_orientation")),
+                "rel_vel_mps": _num(s.get("est_rel_vel")),
+            }
+            poses = {}
+        pose = lambda key: None if key in poses else self.poses[key]  # noqa: E731
+
         def xyz(key, prefix):
-            p = self.poses[key]
+            p = pose(key)
             return {f"{prefix}_{a}": (_num(v) if p else None) for a, v in zip("xyz", p or (None,) * 3)}
 
         row = {
             "session_id": self.session_id, "sim_time": t, "state": state,
             **xyz("ee", "ee"), **xyz("gt", "target"), **xyz("goal", "goal"), **xyz("est", "est"),
-            "distance_m": _num(s.get("est_distance")),
-            "lateral_error_mm": _scale(s.get("est_lateral"), 1000.0),
-            "angle_error_deg": _num(s.get("est_orientation")),
-            "rel_vel_mps": _num(s.get("est_rel_vel")),
-            "rel_ang_vel_rad_s": _num(s.get("est_rel_ang_vel")),
+            **xyz("probe", "probe"), **xyz("dock", "dock"),
+            **errors,
+            "rel_ang_vel_rad_s": None if docking else _num(s.get("est_rel_ang_vel")),
             "is_captured": self.captured,
+            # docking only (null in the capture phase)
+            "dock_roll_deg": _num(s.get("dock_roll_deg")) if docking else None,
+            "insertion_depth_m": _num(s.get("dock_insertion_depth")) if docking else None,
+            "wall_clearance_mm": _scale(s.get("dock_clearance"), 1000.0) if docking else None,
+            "is_docked": bool(s.get("dock_docked")) if docking else False,
         }
         self.sink.set(f"{SESSIONS}/{self.session_id}/{TELEMETRY}/{self.seq:07d}", {"id": self.seq, **row})
         self.seq += 1
@@ -272,10 +300,11 @@ class SessionRecorder:
             "duration_sec": _num(s.get("sim_time_s")),
             "is_success": bool(self.captured),
             "failure_reason": failure if failure else None,
-            "final_distance_m": _num(s.get("est_distance")),
-            "final_angle_deg": _num(s.get("est_orientation")),
+            "final_distance_m": _num(s.get("dock_distance" if s.get("dock_active") else "est_distance")),
+            "final_angle_deg": _num(s.get("dock_axis_deg" if s.get("dock_active") else "est_orientation")),
             "contact_vel_mps": self.contact_vel,
             "final_state": s.get("state"),
+            "is_docked": bool(s.get("dock_docked")) if s.get("dock_active") else self.docked,
         }, merge=True)
         self.sink.flush()
         print(f"[DB] session {self.session_id} finished: captured={self.captured} failure={failure}", flush=True)
@@ -329,7 +358,8 @@ def run_ros(rec: SessionRecorder, ns: str):
         with lock:
             rec.on_captured(m.data)
 
-    for key, topic in (("ee", "ee/pose"), ("gt", "gt/cylinder_pose"), ("goal", "ee/target_pose"), ("est", "estimate/cylinder_pose")):
+    for key, topic in (("ee", "ee/pose"), ("gt", "gt/cylinder_pose"), ("goal", "ee/target_pose"), ("est", "estimate/cylinder_pose"),
+                       ("probe", "dock/probe_pose"), ("dock", "dock/target_pose")):
         node.create_subscription(PoseStamped, f"/{ns}/{topic}", pose_cb(key), reliable)
     node.create_subscription(String, f"/{ns}/state", state_cb, latched)
     node.create_subscription(Bool, f"/{ns}/captured", captured_cb, latched)

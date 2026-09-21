@@ -41,7 +41,7 @@ class DockingVisionCfg:
     """`docking:` section of `config/vision_capture.yaml` (see the YAML for units)."""
 
     # The capture demo only runs the docking phase when this is on (`--dock`)
-    enabled: bool = False
+    enabled: bool = True
     # Skip the capture phase: attach the MEP at its nominal grasp pose and start docking
     # (iteration speed; the capture itself is covered by the other scenarios)
     skip_capture: bool = False

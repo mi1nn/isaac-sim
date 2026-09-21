@@ -431,6 +431,7 @@ class VisionCaptureDemo:
         self.rows: List[dict] = []
         ## Phase 2 (docking): bookkeeping, probe camera handles, CSV
         self._dock: Dict[str, object] = {}
+        self._dock_m_latest: Optional[Dict[str, float]] = None
         self._dock_ref: Optional[Frame] = None
         self._dock_align_since: Optional[float] = None
         self._dock_axial_hold: Optional[float] = None
@@ -1300,6 +1301,7 @@ class VisionCaptureDemo:
             self.step_static(v_est)
         elif s in DOCKING_STATES:
             m = self.dock_metrics()
+            self._dock_m_latest = m  # telemetry only (publish_ros)
             if self._dock_started is None:
                 self._dock_started = self.sim_time
             elif (self.sim_time - self._dock_started > c.docking.phase_timeout_s
@@ -2401,8 +2403,12 @@ class VisionCaptureDemo:
         v, w = self.predictor.twist()
         gt = self.gt_cylinder()
         gt_v, gt_w = self.gt_mep_velocity_at(gt.pos)
-        self.ros.publish_poses(self.sim_time, est, pred, ee, self.goal, self.cam_pose(), v=v, w=w, gt=gt, gt_v=gt_v, gt_w=gt_w)
+        docking = self.state in DOCKING_STATES and self._dock_m_latest is not None
+        probe, dock = (self.probe_world(), self.dock_world()) if docking else (None, None)
+        self.ros.publish_poses(self.sim_time, est, pred, ee, self.goal, self.cam_pose(), v=v, w=w, gt=gt, gt_v=gt_v, gt_w=gt_w,
+                               probe=probe, dock=dock)
         m = self.est_capture_metrics()
+        dm = self._dock_m_latest if docking else None
         lv = self.last_vision
         ok, why = self.tracking_ok()
         self.ros.publish_state(self.sim_time, self.state.value, self.capture.is_attached(0), {
@@ -2412,6 +2418,11 @@ class VisionCaptureDemo:
             "est_age_s": self.estimate_age(), "capture_enabled": self.ros.capture_enabled,
             "start_received": self.ros.start_received, "failure": self.results.failure,
             **{f"est_{k}": val for k, val in m.items()},
+            # Docking phase (probe tip -> SAT_DOCK_POINT); the est_* capture metrics above no longer apply then
+            "dock_active": docking,
+            **({"dock_distance": dm["geometry_distance"], "dock_lateral": dm["lateral"], "dock_axis_deg": dm["axis_deg"],
+                "dock_roll_deg": dm["roll_deg"], "dock_rel_speed": dm["rel_speed"], "dock_insertion_depth": dm["insertion_depth"],
+                "dock_clearance": dm["clearance"], "dock_docked": bool(self.task.docking.is_docked)} if dm is not None else {}),
         })
 
     def status(self):

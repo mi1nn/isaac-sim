@@ -8,6 +8,7 @@ Telemetry out (all topics under /<namespace>/, world frame `ros.world_frame`):
     predicted/cylinder_pose      geometry_msgs/PoseStamped  Cylinder_01 at t + prediction.horizon_sec
     estimate/mep_twist           geometry_msgs/TwistStamped estimated MEP twist (world)
     ee/pose, ee/target_pose      geometry_msgs/PoseStamped  EE contact frame / its target
+    dock/probe_pose, dock/target_pose  PoseStamped        docking phase only: probe tip / SAT_DOCK_POINT
     gt/cylinder_pose, gt/mep_twist                          ground truth, evaluation only
     state                        std_msgs/String          state machine state (latched)
     captured                     std_msgs/Bool            FixedJoint attached (latched)
@@ -94,6 +95,8 @@ class VisionRosInterface:
             "state": create(String, "state", latched),
             "captured": create(Bool, "captured", latched),
             "status": create(String, "status", reliable),
+            "probe": create(PoseStamped, "dock/probe_pose", reliable),
+            "dock": create(PoseStamped, "dock/target_pose", reliable),
         }
         if cfg.publish_ground_truth:
             self.pub["gt"] = create(PoseStamped, "gt/cylinder_pose", reliable)
@@ -216,7 +219,8 @@ class VisionRosInterface:
         self.pub["status"].publish(self._msgs["String"](data=json.dumps(payload)))
 
     def publish_poses(self, t: float, est: Optional[Frame], pred: Optional[Frame], ee: Frame, ee_target: Optional[Frame],
-                      cam: Optional[Frame], v=None, w=None, gt: Optional[Frame] = None, gt_v=None, gt_w=None):
+                      cam: Optional[Frame], v=None, w=None, gt: Optional[Frame] = None, gt_v=None, gt_w=None,
+                      probe: Optional[Frame] = None, dock: Optional[Frame] = None):
         p = self.pub
         if est is not None:
             p["est"].publish(self._pose(est, t))
@@ -227,6 +231,10 @@ class VisionRosInterface:
         p["ee"].publish(self._pose(ee, t))
         if ee_target is not None:
             p["ee_target"].publish(self._pose(ee_target, t))
+        if probe is not None:
+            p["probe"].publish(self._pose(probe, t))
+        if dock is not None:
+            p["dock"].publish(self._pose(dock, t))
         if self.cfg.publish_ground_truth and gt is not None:
             p["gt"].publish(self._pose(gt, t))
             p["gt_twist"].publish(self._twist(gt_v, gt_w, t))
