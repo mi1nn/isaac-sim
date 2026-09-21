@@ -342,7 +342,6 @@ class SessionRecorder:
             "dock_lateral_error_m": dock("dock_lateral"), "dock_orientation_error_deg": dock("dock_orientation_deg"),
             "dock_geometry_distance_m": dock("dock_distance"), "dock_insertion_depth_m": dock("dock_insertion_depth"),
             "dock_relative_speed_mps": dock("dock_rel_speed"),
-            "dock_ready": bool(s.get("dock_ready")) if docking else False,
             "dock_success": bool(s.get("dock_docked")) if docking else False,
         }
         self.sink.set(f"{SESSIONS}/{self.session_id}/{TELEMETRY}/{self.seq:07d}", {"id": self.seq, **row})

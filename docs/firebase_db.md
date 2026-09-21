@@ -51,7 +51,7 @@ Table 2 를 서브컬렉션으로 둔 이유: `session_id` 인덱스 없이 세�
 `id, session_id, sim_time, state, phase, ee_x/y/z, target_x/y/z, goal_x/y/z, est_x/y/z, distance_m, lateral_error_mm, angle_error_deg, rel_vel_mps, rel_ang_vel_rad_s, is_captured`
 + `phase`: `CAPTURE`(기본) / `DOCKING`(도킹 단계) / `MISSION`(MRV 랑데부·`ARM_DEPLOY`, 포획도 도킹도 아님).
 + 도킹용 추가 컬럼: `probe_x/y/z`(프로브 팁), `dock_x/y/z`(위성 도킹점), `dock_roll_deg`, `insertion_depth_m`, `wall_clearance_mm`, `is_docked` (포획 단계에서는 null / false).
-+ 도킹 텔레메트리 (`phase = DOCKING` 일 때만 값, 아니면 null / false): `dock_relative_x_m/y_m/z_m`(도킹 프레임 상대 위치), `dock_lateral_error_m`, `dock_orientation_error_deg`(전체 자세 오차), `dock_geometry_distance_m`(남은 삽입 거리), `dock_insertion_depth_m`, `dock_relative_speed_mps`, `dock_ready`(`DOCK_READY` 상태), `dock_success`(도킹 조인트 생성).
++ 도킹 텔레메트리 (`phase = DOCKING` 일 때만 값, 아니면 null / false): `dock_relative_x_m/y_m/z_m`(도킹 프레임 상대 위치), `dock_lateral_error_m`, `dock_orientation_error_deg`(전체 자세 오차), `dock_geometry_distance_m`(남은 삽입 거리), `dock_insertion_depth_m`, `dock_relative_speed_mps`, `dock_success`(도킹 조인트 생성).
 
 ### 단계별 의미 (같은 컬럼, 단계에 따라 기준이 바뀜)
 
