@@ -30,6 +30,10 @@ States (Section 26 of the task spec):
     static scenario: ... PREDICTING -> STATIC_MEASURE -> SUCCESS
     failures: TAG_LOST, POSE_INVALID, PREDICTION_INVALID, APPROACH_TIMEOUT,
               CAPTURE_FAILED, PHYSICS_ERROR (arm holds its joints = safe stop)
+    moving client (`client.release_enabled`, `moving_dock.py`):
+    ... HOLDING (or --dock_only) -> CLIENT_RELEASE -> CLIENT_CRUISE -> CHASE
+    -> VELOCITY_MATCHING -> RENDEZVOUS -> DOCK_TARGET_ACQUIRE ... DOCKED (unchanged)
+    -> STABILIZING -> STOPPING -> ROBOT_RELEASE -> ARM_RETREAT -> MRV_SEPARATION -> SUCCESS
 """
 
 import csv
@@ -45,8 +49,18 @@ import numpy as np
 import torch
 
 from .docking_demo import ArmKinematics, interp_frame
-from . import probe_dock
+from . import moving_dock, probe_dock
 from .frames import Frame, axis_angle, rotation_angle
+from .moving_dock import (
+    MrvVelocityController,
+    StableTimer,
+    VelocityEstimator,
+    bounded_accel,
+    matched,
+    relative,
+    separation_direction,
+    stopped,
+)
 from .mrv_approach import (
     MrvTransit,
     ThrusterVfx,
@@ -130,10 +144,35 @@ class State(Enum):
     DOCKED = "DOCKED"
     DOCK_HOLDING = "DOCK_HOLDING"
     DOCK_FAILED = "DOCK_FAILED"
+    ## Moving client (`client.release_enabled`, `moving_dock.py`). Wraps the docking
+    ## states above: the capture hands over to CLIENT_RELEASE instead of
+    ## DOCK_TARGET_ACQUIRE, RENDEZVOUS hands over to the unchanged docking states, and
+    ## DOCKED continues with STABILIZING instead of DOCK_HOLDING.
+    CLIENT_RELEASE = "CLIENT_RELEASE"
+    CLIENT_CRUISE = "CLIENT_CRUISE"
+    CHASE = "CHASE"
+    VELOCITY_MATCHING = "VELOCITY_MATCHING"
+    RENDEZVOUS = "RENDEZVOUS"
+    STABILIZING = "STABILIZING"
+    STOPPING = "STOPPING"
+    ROBOT_RELEASE = "ROBOT_RELEASE"
+    ARM_RETREAT = "ARM_RETREAT"
+    MRV_SEPARATION = "MRV_SEPARATION"
+    # failures (DOCKING_FAILED = DOCK_FAILED, PHYSICS_UNSTABLE = PHYSICS_ERROR)
+    CLIENT_RELEASE_FAILED = "CLIENT_RELEASE_FAILED"
+    VELOCITY_MATCH_TIMEOUT = "VELOCITY_MATCH_TIMEOUT"
+    RENDEZVOUS_TIMEOUT = "RENDEZVOUS_TIMEOUT"
+    STOP_FAILED = "STOP_FAILED"
+    ROBOT_RELEASE_FAILED = "ROBOT_RELEASE_FAILED"
+    ARM_RETREAT_FAILED = "ARM_RETREAT_FAILED"
+    SEPARATION_COLLISION = "SEPARATION_COLLISION"
+    SEPARATION_FAILED = "SEPARATION_FAILED"
 
 
 FAILURES = {State.TAG_LOST, State.POSE_INVALID, State.PREDICTION_INVALID, State.APPROACH_TIMEOUT, State.CAPTURE_FAILED, State.PHYSICS_ERROR,
-            State.ABORTED, State.DOCK_FAILED, State.MRV_APPROACH_FAILED}
+            State.ABORTED, State.DOCK_FAILED, State.MRV_APPROACH_FAILED,
+            State.CLIENT_RELEASE_FAILED, State.VELOCITY_MATCH_TIMEOUT, State.RENDEZVOUS_TIMEOUT, State.STOP_FAILED,
+            State.ROBOT_RELEASE_FAILED, State.ARM_RETREAT_FAILED, State.SEPARATION_COLLISION, State.SEPARATION_FAILED}
 # MRV rendezvous phase: no vision, no capture, no docking runs in any of them
 MRV_STATES = {State.MRV_MOVE_STEP_1, State.MRV_STEP_1_REACHED, State.MRV_MOVE_STEP_2,
               State.MRV_STEP_2_REACHED, State.ARM_DEPLOY}
@@ -147,6 +186,16 @@ DOCKING_STATES = {State.DOCK_TARGET_ACQUIRE, State.PRE_DOCK_APPROACH, State.XY_A
 DOCKING_MOTION = {State.PRE_DOCK_APPROACH, State.XY_ALIGN, State.ORIENTATION_ALIGN, State.Z_APPROACH, State.FINAL_INSERTION}
 TERMINAL = FAILURES | {State.SUCCESS}
 TRACKING = {State.APPROACHING, State.SLOW_APPROACH, State.CAPTURE_ATTEMPT, State.STATIC_MEASURE}
+# Moving-client states before / after the (unchanged) docking states
+MOVING_PRE_DOCK = {State.CLIENT_RELEASE, State.CLIENT_CRUISE, State.CHASE, State.VELOCITY_MATCHING, State.RENDEZVOUS}
+MOVING_POST_DOCK = {State.STABILIZING, State.STOPPING, State.ROBOT_RELEASE, State.ARM_RETREAT, State.MRV_SEPARATION}
+MOVING_STATES = MOVING_PRE_DOCK | MOVING_POST_DOCK
+# ... in which the robot <-> MEP capture joint must exist
+MOVING_ATTACHED = MOVING_PRE_DOCK | {State.STABILIZING, State.STOPPING}
+# ... in which the MEP <-> client docking joint must exist
+MOVING_DOCKED = MOVING_POST_DOCK
+# ... in which the MRV holds its station relative to the client (v = v_client + Kp e)
+MRV_TRACKS_CLIENT = {State.VELOCITY_MATCHING, State.RENDEZVOUS, State.STABILIZING, State.STOPPING} | DOCKING_STATES
 
 # EE contact frame relative to the tag frame when facing it: half turn about X
 FLIP = Frame(np.zeros(3), np.diag([1.0, -1.0, -1.0]))
@@ -473,6 +522,28 @@ class VisionCaptureDemo:
         # deadline is measured from here, so `test.dynamic_timeout_sec` keeps its meaning
         # whether or not the approach ran ahead of it.
         self._capture_t0 = 0.0
+        ## Moving-client scenario (`moving_dock.py`). Inactive -- nothing below is used
+        ## and every existing path runs unchanged -- unless `client.release_enabled`.
+        self.moving = bool(self.cfg.client.release_enabled)
+        self._mv_active = False  # set once the capture hands over to CLIENT_RELEASE
+        self._client_live = False  # client released at t = 0, before the docking phase
+        rv = self.cfg.rendezvous
+        self._mv_ctrl = MrvVelocityController(rv.mrv_max_accel_mps2, rv.position_gain_hz, rv.max_correction_speed_mps)
+        self._mv_est = {k: VelocityEstimator(rv.velocity_window_s) for k in ("client", "mep", "mrv")}
+        self._mv_timer = StableTimer()
+        self._mv_d_ref: Optional[np.ndarray] = None  # verified client -> MRV offset (world)
+        self._mv_sep_dir: Optional[np.ndarray] = None
+        self._mv_force: Dict[str, np.ndarray] = {}
+        self._mvm: Dict[str, object] = {}  # measurements of the current step
+        self._mv: Dict[str, object] = {}  # bookkeeping / metrics
+        self._mv_rows: List[dict] = []
+        self._next_mv_log_t = 0.0
+        # Motion trail (world-fixed start cross + a point every `motion_trail_period_s`)
+        # and the GUI speed window -- visual only (`logging.motion_trail` / `motion_hud`)
+        self._trail: Dict[str, List[np.ndarray]] = {"client": [], "mep": [], "mrv": []}
+        self._next_trail_t = 0.0
+        self._hud = None
+        self._hud_labels: List[object] = []
 
         ## Output
         self.out_dir = out_dir
@@ -491,6 +562,13 @@ class VisionCaptureDemo:
                 self._dock_csv_file = open(self.dock_csv_path, "w", newline="")
                 self._dock_csv = csv.DictWriter(self._dock_csv_file, fieldnames=list(probe_dock.CSV_COLUMNS))
                 self._dock_csv.writeheader()
+        self._mv_csv = self._mv_csv_file = None
+        if self.moving:
+            self.moving_csv_path = out_dir / f"{self.label}_moving.csv"
+            if self.cfg.logging.csv_enabled:
+                self._mv_csv_file = open(self.moving_csv_path, "w", newline="")
+                self._mv_csv = csv.DictWriter(self._mv_csv_file, fieldnames=list(moving_dock.CSV_COLUMNS))
+                self._mv_csv.writeheader()
         self.csv_path = csv_path
         self._csv_file = self._csv = None
         if self.cfg.logging.csv_enabled:
@@ -656,6 +734,10 @@ class VisionCaptureDemo:
         if v_ff is None:
             qd = torch.zeros((1, n), device=self.arm.device)
         else:
+            # The joints only produce the EE motion RELATIVE to the base. The base is
+            # fixed in every scenario except the moving client, where the MRV translates
+            # (`mrv_base_velocity` is zero otherwise, so this is the previous formula).
+            v_ff = np.asarray(v_ff, dtype=float) - self.mrv_base_velocity()
             j = self.arm.jacobian_base()[0]  # (6, n), base frame, EE contact point
             twist = torch.zeros(6, dtype=j.dtype, device=j.device)
             twist[:3] = torch.tensor(self.arm.base.rot.T @ v_ff, dtype=j.dtype, device=j.device)
@@ -678,9 +760,15 @@ class VisionCaptureDemo:
             self.results.failure = f"{state.value}: {reason}"
             print(f"[FAIL] {state.value}: {reason}", flush=True)
             self.q_hold = None  # safe stop: hold the joints where they are
+        if state in TERMINAL:
+            # Moving client: no thrust stays on after the end (the wrench buffers would keep
+            # being applied); the MRV keeps its station on the client while the MEP is held,
+            # and stops otherwise (`moving_after_step`)
+            self.clear_wrenches()
         self.state = state
         self.state_time = 0.0
         self._settled_since = None
+        self._mv_timer.reset()
 
     ##################
     ### Conditions ###
@@ -767,8 +855,13 @@ class VisionCaptureDemo:
         qd = float(torch.abs(self.task._robot.data.joint_vel[0]).max())
         if qd > 1.0:
             return f"robot joint speed {qd:.2f} rad/s (joint explosion)"
-        if (self.state in (State.CAPTURED, State.HOLDING, State.RETREAT) or self.state in DOCKING_STATES) and not self.capture.is_attached(0):
+        if (self.state in (State.CAPTURED, State.HOLDING, State.RETREAT) or self.state in DOCKING_STATES
+                or self.state in MOVING_ATTACHED) and not self.capture.is_attached(0):
             return "FixedJoint missing after capture"
+        if self._mv_active or self._client_live:
+            err = self.check_client_physics()
+            if err is not None:
+                return err
         if self.contacts is not None and not self.capture.is_attached(0):
             f = float(torch.norm(self.contacts.data.net_forces_w[0], dim=-1).max())
             self._max_contact = max(self._max_contact, f)
@@ -786,6 +879,7 @@ class VisionCaptureDemo:
         r = self.results
         t = self.task
         print("[INIT] ---- MRV Phase 1 vision capture ----", flush=True)
+        self.open_motion_hud()  # monitor window for the whole run (GUI only)
         print(f"[INIT] scenario {self.scenario}, motion mode {c.mep.motion_mode}, MEP mass {float(self.mep.root_physx_view.get_masses().sum()):.1f} kg, gravity {tuple(t.cfg.sim.gravity)}", flush=True)
         v0 = self.mep.data.root_com_lin_vel_w[0].cpu().numpy()
         w0 = self.mep.data.root_com_ang_vel_w[0].cpu().numpy()
@@ -878,6 +972,10 @@ class VisionCaptureDemo:
         ## MRV rendezvous phase: fold the arm and back the MRV off to its start pose
         if c.mrv.enabled:
             self.begin_mrv_approach()
+        ## Moving client from t = 0 (`client.release_at_start`): released now, the MRV
+        ## joins at the docking handover
+        if self.moving and c.client.release_at_start and not c.docking.skip_capture:
+            self.begin_client_drift()
         ## Docking phase reported next to the capture setup
         if c.docking.enabled:
             geo = self.geo
@@ -910,8 +1008,11 @@ class VisionCaptureDemo:
             print(f"[INIT] SAT_DOCK_POINT (satellite body): pos {np.round(geo.sat_dock.pos, 4).tolist()}, axis {np.round(geo.sat_dock.rot[:, 2], 4).tolist()}, dock_depth {t.cfg.docking.dock_depth} m", flush=True)
             if c.docking.skip_capture:
                 if self.skip_capture_to_docking():
-                    self.begin_docking()
-                    self.goto(State.DOCK_TARGET_ACQUIRE)
+                    if self.moving:
+                        self.goto(self.begin_moving_client())
+                    else:
+                        self.begin_docking()
+                        self.goto(State.DOCK_TARGET_ACQUIRE)
                 else:
                     self.goto(State.DOCK_FAILED, "skip_capture could not attach the MEP at the nominal grasp pose")
 
@@ -1207,6 +1308,17 @@ class VisionCaptureDemo:
                 self.goto(State.ABORTED, "ROS cmd/abort")
                 s = self.state
 
+        if self._mv_active:
+            self.moving_measure()
+            ## The arm must not hit the client / MEP once it has let go (checked before
+            ## the generic 200 N contact limit of `check_physics`, with its own limit)
+            if s in (State.ARM_RETREAT, State.MRV_SEPARATION):
+                f = self._mvm.get("contact_n", 0.0)
+                self._mv["max_separation_contact_n"] = max(float(self._mv.get("max_separation_contact_n", 0.0)), f)
+                if f > self.cfg.separation.max_contact_force_n:
+                    self.goto(State.SEPARATION_COLLISION, f"arm contact force {f:.1f} N > {self.cfg.separation.max_contact_force_n:.0f} N in {s.value}")
+                    s = self.state
+
         if s not in TERMINAL:
             err = self.check_physics()
             if err is not None:
@@ -1299,6 +1411,8 @@ class VisionCaptureDemo:
             self.step_retreat()
         elif s == State.STATIC_MEASURE:
             self.step_static(v_est)
+        elif s in MOVING_STATES:
+            self.step_moving(s)
         elif s in DOCKING_STATES:
             m = self.dock_metrics()
             self._dock_m_latest = m  # telemetry only (publish_ros)
@@ -1309,7 +1423,10 @@ class VisionCaptureDemo:
                 return self.goto(State.DOCK_FAILED,
                                  f"the docking phase did not finish within {c.docking.phase_timeout_s:.0f} s "
                                  f"(state {s.value}, remaining {m['geometry_distance']:.3f} m, lateral {m['lateral']*1000:.1f} mm)")
-            self._tip_history.append((self.sim_time, self.probe_world().pos.copy()))
+            # "At rest" means at rest RELATIVE to the client: with a drifting client the
+            # tip moves in the world while it holds its pose on the docking axis
+            tip = self.probe_world().pos.copy()
+            self._tip_history.append((self.sim_time, self.sat_frame().inv().point(tip) if self._mv_active else tip))
             self._tip_history = [x for x in self._tip_history if x[0] >= self.sim_time - 3.0 * self.cfg.docking.settle_window_s]
             if s == State.DOCK_TARGET_ACQUIRE:
                 self.step_dock_target_acquire(m)
@@ -1334,6 +1451,8 @@ class VisionCaptureDemo:
             if self.sim_time >= self._next_dock_log_t:
                 self._next_dock_log_t = self.sim_time + 1.0 / self.cfg.logging.rate_hz - 1e-9
                 self.log_dock_row(m)
+                if not self._mv_active:
+                    self.update_motion_hud(m)  # the moving client refreshes it in `moving_after_step`
                 if self.cfg.logging.debug_draw:
                     self.update_dock_visuals(m)
             if self.sim_time >= self._next_status_t:
@@ -1390,6 +1509,9 @@ class VisionCaptureDemo:
         """Where the capture phase hands over: SUCCESS, or the docking phase."""
         if not self.cfg.docking.enabled:
             return State.SUCCESS
+        if self.moving:
+            # Moving client: rendezvous first, the docking starts from RENDEZVOUS
+            return self.begin_moving_client()
         self.begin_docking()
         return State.DOCK_TARGET_ACQUIRE
 
@@ -1732,10 +1854,16 @@ class VisionCaptureDemo:
             return False, "probe tip or docking target pose is not finite"
         prev = self._dock.get("prev_dock_pos")
         if prev is not None:
-            jump = float(np.linalg.norm(dock.pos - prev))
+            # Compared with where the target's own motion takes it since the last check
+            # (this runs only in some states, so the previous sample can be many seconds
+            # old). A drifting client moves metres between them; a static one does not
+            # (v = 0 -> the previous check, unchanged).
+            prev_t, prev_pos = prev
+            expected = prev_pos + self.sat_velocity_at(prev_pos) * (self.sim_time - prev_t)
+            jump = float(np.linalg.norm(dock.pos - expected))
             if jump > 0.25:  # the target cannot move that far in one control step
                 return False, f"docking target jumped {jump*1000:.0f} mm in one step"
-        self._dock["prev_dock_pos"] = dock.pos.copy()
+        self._dock["prev_dock_pos"] = (self.sim_time, dock.pos.copy())
         return True, "ok"
 
     def begin_docking(self):
@@ -1752,6 +1880,7 @@ class VisionCaptureDemo:
         print(f"[DOCK] target acquired: remaining insertion {m['geometry_distance']:.3f} m, lateral {m['lateral']*1000:.1f} mm, "
               f"axis {m['axis_deg']:.2f} deg, roll {m['roll_deg']:.2f} deg, depth raw {m['depth_raw']:.3f} m ({int(m['depth_pixels'])} px)", flush=True)
         self.frame_docking_view(close=False)
+        self.open_motion_hud()  # static docking too (the moving client opened it already)
         self.results.metrics["docking"] = {
             "probe_tip_in_link": {"pos": tip_in_link.pos.tolist(), "quat_wxyz": list(tip_in_link.quat)},
             "at_acquire": {k: v for k, v in m.items() if isinstance(v, float)},
@@ -1852,12 +1981,13 @@ class VisionCaptureDemo:
         self.track_probe(goal, self._dock["commanded_speed"])
         # Hand over only once the swing left by the transport has died out, otherwise the
         # alignment chases a tip that is still moving 100+ mm per half period
-        if pe < 0.05 and self.tip_settled():
+        forced = self.forced_insertion()
+        if pe < 0.05 and (forced or self.tip_settled()):
             self._dock_axial_hold = m["axial"]
             self.frame_docking_view(close=True)
-            print(f"[DOCK] pre-dock reached and settled: tip {-m['insertion_depth']:.3f} m in front of the nozzle exit, "
+            print(f"[DOCK] pre-dock reached{' (forced insertion: no settle wait)' if forced else ' and settled'}: tip {-m['insertion_depth']:.3f} m in front of the nozzle exit, "
                   f"lateral {m['lateral']*1000:.1f} mm, axis {m['axis_deg']:.2f} deg, goal error {pe*1000:.0f} mm", flush=True)
-            self.goto(State.XY_ALIGN)
+            self.goto(State.ALIGNMENT_CHECK if forced else State.XY_ALIGN)
         else:
             self._dock_stage_timeout(m)
 
@@ -1909,9 +2039,9 @@ class VisionCaptureDemo:
         before any insertion."""
         d = self.cfg.docking
         self.align_track(m)
+        if self.forced_insertion():
+            return self.forced_alignment_check(m)
         ok, bad = probe_dock.alignment_ok(d, m)
-        if ok and self._depth_offset is None and d.auto_calibrate and d.depth_enabled:
-            self._calibrate_depth(m)  # only on the axis: elsewhere the ray misses the nozzle
         if ok and not self.tip_settled():
             ok, bad = False, [f"probe tip not at rest (> {d.settle_window_m*1000:.0f} mm over {d.settle_window_s:.0f} s)"]
             self._dock_align_since = None
@@ -1921,7 +2051,22 @@ class VisionCaptureDemo:
             if m["lateral"] > d.align_lateral_m:
                 return self.goto(State.XY_ALIGN, "; ".join(bad))
             return self.goto(State.ORIENTATION_ALIGN, "; ".join(bad))
+        # Aligned and at rest: collect on-axis calibration samples (`_calibrate_depth`
+        # keeps only those within the tighter calibration limits)
+        needs_calibration = d.auto_calibrate and d.depth_enabled and self._depth_offset is None
+        if needs_calibration:
+            self._calibrate_depth(m)
+            needs_calibration = self._depth_offset is None
         self._dock_align_since = self._dock_align_since if self._dock_align_since is not None else self.sim_time
+        # With `require_depth` the approach cannot advance on an uncalibrated depth, so it
+        # does not start before the on-axis calibration exists (the alignment keeps
+        # converging meanwhile; `stage_timeout_s` still applies)
+        if needs_calibration and d.require_depth:
+            return self._dock_stage_timeout(m)
+        if self._mv_active and self.cfg.rendezvous.concurrent_docking:
+            ok_mv, _ = self.insertion_gates()
+            if not ok_mv:
+                return self._dock_stage_timeout(m)
         if self.sim_time - self._dock_align_since >= d.align_hold_s:
             self.results.check("[DOCK2] Alignment before the docking-axis approach", True,
                                f"lateral {m['lateral']*1000:.2f} mm (<= {d.align_lateral_m*1000:.0f}), axis {m['axis_deg']:.3f} deg (<= {d.align_axis_deg}), "
@@ -1940,19 +2085,23 @@ class VisionCaptureDemo:
         is left, and it never advances without a valid depth reading.
         """
         d = self.cfg.docking
-        ok, bad = probe_dock.approach_still_aligned(d, m)
+        forced = self.forced_insertion()
+        ok, bad = self.forced_corridor(m) if forced else probe_dock.approach_still_aligned(d, m)
         if not ok:
             self._dock_align_since = None
             self._dock["realigns"] = int(self._dock.get("realigns", 0)) + 1
             print(f"[DOCK] approach stopped, re-aligning: {'; '.join(bad)}", flush=True)
-            return self.goto(State.XY_ALIGN)
+            return self.goto(State.ALIGNMENT_CHECK if forced else State.XY_ALIGN)
+        if forced and self._depth_offset is None and d.auto_calibrate and d.depth_enabled:
+            self._calibrate_depth(m)  # on-axis samples only; the reading is advisory here
         valid, why = self.docking_tracking_valid()
         if not valid:
             return self.goto(State.DOCK_FAILED, f"docking target invalid: {why}")
         self._dock_axial_hold = None
         remaining = m["geometry_distance"]
         # Fail-safe: hold position (do not advance) while the depth is not trusted
-        depth_blocked = d.require_depth and not m["depth_ok"]
+        # Forced insertion: the depth is logged, it does not hold the approach
+        depth_blocked = d.require_depth and not m["depth_ok"] and not forced
         if depth_blocked:
             self._dock["depth_blocked_s"] = float(self._dock.get("depth_blocked_s", 0.0)) + self.dt
             if not self._dock.get("depth_warned"):
@@ -1967,7 +2116,10 @@ class VisionCaptureDemo:
         self._dock["commanded_speed"] = self._dock_speed
         goal = probe_dock.tip_goal(self.dock_world(), axial_cmd)
         step = self.cfg.approach.max_joint_step_rad if not final else 0.5 * self.cfg.approach.max_joint_step_rad
-        self.track_probe(goal, probe_dock.decelerated(d, speed, remaining, d.z_decel_gain_hz) if speed > 0.0 else 1e-9, max_step=step)
+        v_ax = probe_dock.decelerated(d, speed, remaining, d.z_decel_gain_hz) if speed > 0.0 else 1e-9
+        if forced:  # the MEP always closes on the client (relative speed along the axis)
+            v_ax = max(v_ax, self.cfg.rendezvous.insertion_min_relative_speed_mps)
+        self.track_probe(goal, v_ax, max_step=step)
         self._dock["min_clearance"] = min(float(self._dock.get("min_clearance", math.inf)), m["clearance"]) if m["insertion_depth"] > 0.0 else self._dock.get("min_clearance", math.inf)
         self._dock["max_lateral_inserting"] = max(float(self._dock.get("max_lateral_inserting", 0.0)), m["lateral"]) if m["insertion_depth"] > 0.0 else self._dock.get("max_lateral_inserting", 0.0)
         if not final and remaining <= d.insertion_zone_m:
@@ -1984,7 +2136,12 @@ class VisionCaptureDemo:
         self.track_probe(probe_dock.tip_goal(self.dock_world(), 0.0), d.insertion_speed_mps,
                          max_step=0.5 * self.cfg.approach.max_joint_step_rad)
         valid, why = self.docking_tracking_valid()
-        ready, bad = probe_dock.dock_ready(d, m, m["rel_speed"], bool(m["depth_ok"]), valid, m["clearance"])
+        ready, bad = probe_dock.dock_ready(d, m, m["rel_speed"], bool(m["depth_ok"]) or self.forced_insertion(), valid, m["clearance"])
+        if self._mv_active:
+            # Moving client: the same conditions, plus MEP-client and MRV-client RELATIVE
+            # velocity and the MRV station error. The world velocity is not a condition.
+            ok_mv, bad_mv = self.moving_dock_gates()
+            ready, bad = ready and ok_mv, bad + bad_mv
         if ready:
             detail = (f"axial {m['axial']*1000:.2f} mm, radial {m['lateral']*1000:.2f} mm, axis {m['axis_deg']:.3f} deg, roll {m['roll_deg']:.3f} deg, "
                       f"depth {m['insertion_depth']:.3f} m inside the nozzle, relative velocity {m['rel_speed']*1000:.1f} mm/s, "
@@ -1999,6 +2156,8 @@ class VisionCaptureDemo:
             self._dock["rel_at_dock"] = self.probe_world().inv() @ self.sat_frame()
             self.results.check("[DOCK5] Docking FixedJoint created", bool(self.task.docking.is_docked),
                                "UsdPhysics.FixedJoint MEP <-> satellite anchored at the probe tip")
+            if self._mv_active:
+                self.record_moving_dock()
             self.q_hold = self.arm.joint_pos().clone()
             self.goto(State.DOCKED if self.task.docking.is_docked else State.DOCK_FAILED,
                       "" if self.task.docking.is_docked else "the docking joint was not created")
@@ -2008,7 +2167,13 @@ class VisionCaptureDemo:
 
     def step_docked(self, m):
         self.dock_hold()
-        self.goto(State.DOCK_HOLDING)
+        # Moving client: the docked stack is still drifting -> stabilise, then stop it
+        if self._mv_active:
+            # immediate_release: let go at once, the stack stops in the background and the
+            # MRV departs; otherwise stabilise and stop everything first
+            self.goto(State.ROBOT_RELEASE if self.cfg.post_docking.immediate_release else State.STABILIZING)
+        else:
+            self.goto(State.DOCK_HOLDING)
 
     def step_dock_holding(self, m):
         """Hold the docked state and watch for jumps / penetration / joint loss."""
@@ -2029,6 +2194,992 @@ class VisionCaptureDemo:
             self.results.check("[DOCK7] No penetration while docked", h["hold_min_clearance_mm"] > 0.0,
                                f"min probe-to-wall clearance {h['hold_min_clearance_mm']:.0f} mm")
             self.goto(State.SUCCESS)
+
+    ###############################################################
+    ### Moving client: rendezvous -> dock -> stop -> release -> depart ###
+    ###############################################################
+    ## Frames: world, SI units. Everything gated is RELATIVE to the client:
+    ##   v_rel_mrv = v_mrv - v_client,  v_rel_mep = v_mep - v_client,
+    ##   e_mrv = (p_client - p_mrv) - d_ref  (d_ref: the verified client -> MRV offset).
+    ## Joints: robot <-> MEP = `CaptureManager` `{ENV}/capture_joint` (released in
+    ## ROBOT_RELEASE); MEP <-> client = `DockingManager` `{ENV}/docking_joint` (kept).
+
+    def mrv_base_velocity(self) -> np.ndarray:
+        """Commanded world velocity of the MRV (arm base) [m/s]; zero unless it translates."""
+        if not self._mv_active:
+            return np.zeros(3)
+        return self._mv_ctrl.v.copy()
+
+    def _body_mass_inertia(self, body) -> Tuple[float, np.ndarray]:
+        """Total mass [kg] and world-frame inertia about the COM [kg m^2] of a rigid object."""
+        mass = float(body.root_physx_view.get_masses().sum())
+        inertia = body.root_physx_view.get_inertias().reshape(-1)[:9].cpu().numpy().astype(float).reshape(3, 3)
+        rot = Frame.from_pos_quat(np.zeros(3), body.data.root_com_quat_w[0].tolist()).rot
+        return mass, rot @ inertia @ rot.T
+
+    def apply_wrench(self, name: str, force_w, torque_w):
+        """World-frame force [N] / torque [N m] at the COM, applied every physics step
+        until changed (`RigidObject.set_external_force_and_torque`, written by
+        `scene.write_data_to_sim`). Passed in the body (link) frame, the asset's default
+        wrench frame: switching an asset to `is_global=True` makes Isaac Lab warn once,
+        and every caller here re-sets the wrench each step anyway."""
+        body = self.task._satellite if name == "client" else self.mep
+        rot = Frame.from_pos_quat(np.zeros(3), body.data.root_quat_w[0].tolist()).rot
+        f_b = rot.T @ np.asarray(force_w, dtype=float)
+        t_b = rot.T @ np.asarray(torque_w, dtype=float)
+        f = torch.tensor(f_b, dtype=torch.float32, device=body.device).reshape(1, 1, 3)
+        tq = torch.tensor(t_b, dtype=torch.float32, device=body.device).reshape(1, 1, 3)
+        body.set_external_force_and_torque(f, tq, is_global=False)
+        self._mv_force[name] = np.asarray(force_w, dtype=float).copy()
+
+    def clear_wrenches(self):
+        if not self._mv_active:
+            return
+        for name in ("client", "mep"):
+            self.apply_wrench(name, np.zeros(3), np.zeros(3))
+
+    def client_constraints_report(self) -> dict:
+        """PXR stage traversal: is the client a free dynamic body, and what is jointed to it?
+
+        Joints between two prims *inside* the client are its own structure and are never
+        touched. A joint with the client on one side and nothing (the world) on the other
+        would hold the whole client in place: such a joint is disabled here. None exists
+        in `satellite_v3.usd` (measured), so this only reports.
+        """
+        from pxr import UsdPhysics
+
+        stage = self.stage
+        root, body = self.geo.sat_prim_path, self.geo.sat_body_path
+        prim = stage.GetPrimAtPath(body)
+        rb = UsdPhysics.RigidBodyAPI(prim)
+        out = {
+            "body": body,
+            "rigid_body_api": bool(prim.HasAPI(UsdPhysics.RigidBodyAPI)),
+            "rigid_body_enabled": bool(rb.GetRigidBodyEnabledAttr().Get()) if prim.HasAPI(UsdPhysics.RigidBodyAPI) else False,
+            "kinematic": bool(rb.GetKinematicEnabledAttr().Get()) if prim.HasAPI(UsdPhysics.RigidBodyAPI) else None,
+            "disable_gravity_attr": prim.GetAttribute("physxRigidBody:disableGravity").Get() if prim.HasAttribute("physxRigidBody:disableGravity") else None,
+            "scene_gravity": list(self.task.cfg.sim.gravity),
+            "internal_joints": [], "external_joints": [], "world_joints_disabled": [],
+        }
+
+        def inside(path: str) -> bool:
+            return path == root or path.startswith(root + "/")
+
+        for p in stage.Traverse():
+            if not p.IsA(UsdPhysics.Joint):
+                continue
+            j = UsdPhysics.Joint(p)
+            b0 = [str(t) for t in j.GetBody0Rel().GetTargets()]
+            b1 = [str(t) for t in j.GetBody1Rel().GetTargets()]
+            if not any(inside(t) for t in b0 + b1):
+                continue
+            entry = {"path": str(p.GetPath()), "body0": b0, "body1": b1, "enabled": bool(j.GetJointEnabledAttr().Get())}
+            if b0 and b1 and all(inside(t) for t in b0 + b1):
+                out["internal_joints"].append(entry)  # the client's own structure: kept
+            elif not b0 or not b1:
+                if entry["enabled"]:
+                    j.GetJointEnabledAttr().Set(False)
+                    out["world_joints_disabled"].append(entry)
+            else:
+                out["external_joints"].append(entry)
+        return out
+
+    def begin_client_drift(self):
+        """t = 0: release the client while the MRV approach / capture run as verified.
+
+        The MRV station `d_ref` is fixed here from the NOMINAL poses (the MRV approach
+        displaces the MRV only temporarily), i.e. the relative geometry the docking was
+        verified in. When the docking starts the client has drifted ahead; the MRV then
+        closes that gap next to the docking transport and the insertion waits for it
+        (`insertion_gates`)."""
+        c = self.cfg
+        if self.mrv is None:
+            self.mrv = MrvTransit(self.task, self.arm)
+        p_client = self.task._satellite.data.root_com_pos_w[0].cpu().numpy().astype(float)
+        self._mv_d_ref = p_client - self.mrv.nominal_root.cpu().numpy().astype(float)
+        self._mv["start_time_s"] = self.sim_time
+        self._client_live = True
+        self.client_live_step(apply=False)
+        print(f"[MOVE] client released at t = {self.sim_time:.1f} s (before the capture): drift "
+              f"{np.round(c.client.velocity(), 4).tolist()} m/s; MRV station d_ref {np.round(self._mv_d_ref, 3).tolist()} m "
+              f"(nominal poses), the MRV joins at the docking handover", flush=True)
+
+    def client_live_step(self, apply: bool = True):
+        """Before the docking phase: client thrust ramp, trail, window (MRV untouched)."""
+        sat = self.task._satellite.data
+        p_c = sat.root_com_pos_w[0].cpu().numpy().astype(float)
+        self._mvm.update({"client_p": p_c, "client_v_px": sat.root_com_lin_vel_w[0].cpu().numpy().astype(float),
+                          "client_w": sat.root_com_ang_vel_w[0].cpu().numpy().astype(float)})
+        if apply:
+            self.concurrent_release_step()
+        lg = self.cfg.logging
+        if lg.motion_trail and self.sim_time >= self._next_trail_t:
+            self._next_trail_t = self.sim_time + lg.motion_trail_period_s - 1e-9
+            pts = self._trail["client"]
+            pts.append(p_c.copy())
+            if len(pts) > int(lg.motion_trail_max_points):
+                del pts[1]
+
+    def begin_moving_client(self) -> State:
+        """Hand over from the capture (MEP held by the arm) to the moving-client scenario."""
+        c = self.cfg
+        r = self.results
+        report = self.client_constraints_report()
+        self._mv["client_report"] = report
+        g0 = all(abs(g) < 1e-9 for g in report["scene_gravity"]) or bool(report["disable_gravity_attr"])
+        free = report["rigid_body_api"] and report["rigid_body_enabled"] and report["kinematic"] is False
+        r.check("[MOVE0] Client is a free dynamic rigid body", free and g0 and not report["external_joints"],
+                f"{report['body']}: RigidBodyAPI {report['rigid_body_api']}, enabled {report['rigid_body_enabled']}, "
+                f"kinematic {report['kinematic']}, scene gravity {report['scene_gravity']}; joints to the world disabled: "
+                f"{[j['path'] for j in report['world_joints_disabled']] or 'none found'}; internal joints kept: "
+                f"{len(report['internal_joints'])}; joints to other bodies: {[j['path'] for j in report['external_joints']] or 'none'}")
+        print(f"[MOVE] client constraints (PXR traversal): {report}", flush=True)
+        if not (free and g0):
+            return State.CLIENT_RELEASE_FAILED
+        ## MRV handle: the one the approach phase used (at its nominal pose by now), or a
+        ## new one at the current (nominal) pose
+        try:
+            if self.mrv is None:
+                self.mrv = MrvTransit(self.task, self.arm)
+            if self.vfx is None and c.mrv.vfx_enabled:
+                try:
+                    self.vfx = ThrusterVfx(self.task, c.mrv, hull_nominal=self.mrv.hull_nominal, quiet=True)
+                except Exception as e:
+                    print(f"[MRV-VFX] plume layer unavailable ({e}); the scenario continues without it", flush=True)
+        except Exception as e:
+            r.check("[MOVE0] MRV can be translated", False, f"{e}")
+            return State.CLIENT_RELEASE_FAILED
+        sat = self.task._satellite
+        m_c, _ = self._body_mass_inertia(sat)
+        m_m, _ = self._body_mass_inertia(self.mep)
+        p_client = sat.data.root_com_pos_w[0].cpu().numpy().astype(float)
+        if self._mv_d_ref is None:  # else: fixed at t = 0 from the nominal poses (`begin_client_drift`)
+            self._mv_d_ref = p_client - self.mrv.root_pos()
+        self._mv_sep_dir = separation_direction(c.client.velocity(), c.separation.direction)
+        self._mv_ctrl.reset()
+        for est in self._mv_est.values():
+            est.reset()
+        self._mv_active = True
+        self._mv.update({
+            "client_mass_kg": m_c, "mep_mass_kg": m_m, "d_ref_m": self._mv_d_ref.tolist(),
+            "separation_direction": self._mv_sep_dir.tolist(),
+            "start_time_s": float(self._mv.get("start_time_s", self.sim_time)),
+            "docking_start_time_s": self.sim_time,
+            "capture_joint": self.capture._joint_prim_paths[0], "docking_joint": self.task.docking._joint_path,
+        })
+        self.results.metrics["moving"] = self._mv
+        self.moving_measure()
+        self.open_motion_hud()
+        if float(np.linalg.norm(c.client.angular_velocity())) > 0.0:
+            print("[MOVE] WARNING: client.angular_velocity_rad_s is non-zero; the MRV only translates, "
+                  "so docking a rotating client is not a verified configuration", flush=True)
+        print(f"[MOVE] moving-client scenario: client {m_c:.0f} kg, MEP {m_m:.0f} kg; client velocity "
+              f"{np.round(c.client.velocity(), 4).tolist()} m/s; MRV station d_ref = p_client - p_mrv = "
+              f"{np.round(self._mv_d_ref, 3).tolist()} m; departure direction {np.round(self._mv_sep_dir, 3).tolist()}; "
+              f"robot<->MEP joint {self._mv['capture_joint']} (released later), MEP<->client joint {self._mv['docking_joint']} (kept)",
+              flush=True)
+        if c.rendezvous.concurrent_docking:
+            # No waiting: the docking transport starts now; the release thrust and the MRV
+            # station keeping run next to it, the relative gates are checked before insertion
+            self.begin_docking()
+            return State.DOCK_TARGET_ACQUIRE
+        return State.CLIENT_RELEASE
+
+    def moving_measure(self):
+        """All client / MEP / MRV quantities of this control step (world frame)."""
+        sat, mep = self.task._satellite.data, self.mep.data
+        t = self.sim_time
+        p_c = sat.root_com_pos_w[0].cpu().numpy().astype(float)
+        p_m = mep.root_com_pos_w[0].cpu().numpy().astype(float)
+        p_r = self.mrv.root_pos()
+        for key, p in (("client", p_c), ("mep", p_m), ("mrv", p_r)):
+            self._mv_est[key].add(t, p)
+        v_c_px = sat.root_com_lin_vel_w[0].cpu().numpy().astype(float)
+        v_m_px = mep.root_com_lin_vel_w[0].cpu().numpy().astype(float)
+        v_c = self._mv_est["client"].velocity()
+        v_m = self._mv_est["mep"].velocity()
+        v_r = self._mv_ctrl.v.copy()
+        v_c_gate = v_c if v_c is not None else v_c_px
+        contact = 0.0
+        if self.contacts is not None:
+            contact = float(torch.norm(self.contacts.data.net_forces_w[0], dim=-1).max())
+        probe, dock = self.probe_world(), self.dock_world()
+        e_dock = probe_dock.dock_errors(probe, dock)
+        self._mvm = {
+            "client_p": p_c, "client_v": v_c_gate, "client_v_fd": v_c, "client_v_px": v_c_px,
+            "client_w": sat.root_com_ang_vel_w[0].cpu().numpy().astype(float),
+            "mep_p": p_m, "mep_v": v_m, "mep_v_px": v_m_px,
+            "mep_w": mep.root_com_ang_vel_w[0].cpu().numpy().astype(float),
+            "mrv_p": p_r, "mrv_v": v_r, "mrv_v_fd": self._mv_est["mrv"].velocity(), "mrv_a": self._mv_ctrl.a.copy(),
+            "v_rel_mrv": relative(v_r, v_c) if v_c is not None else None,
+            "v_rel_mep": relative(v_m, v_c) if (v_m is not None and v_c is not None) else None,
+            "e_mrv": self._mv_ctrl.position_error(p_r, p_c, self._mv_d_ref),
+            "rel_mep_client": relative(probe.pos, dock.pos),  # MEP docking point - client docking point
+            "dock_position_error": float(np.linalg.norm(probe.pos - dock.pos)),
+            "dock_orientation_error": e_dock["orientation_deg"],
+            # probe axis vs nozzle axis (dock frame +Z): the angle the insertion aborts on
+            "dock_axis_deg": e_dock["axis_deg"], "dock_lateral_m": e_dock["lateral"],
+            "dock_roll_deg": e_dock["roll_deg"],
+            "contact_n": contact,
+        }
+
+    @staticmethod
+    def _speed(v) -> float:
+        return math.nan if v is None else float(np.linalg.norm(v))
+
+    def check_client_physics(self) -> Optional[str]:
+        """PHYSICS_UNSTABLE (reported as PHYSICS_ERROR): NaN / runaway client."""
+        cc = self.cfg.client
+        d = self.task._satellite.data
+        if not all(bool(torch.isfinite(x).all()) for x in (d.root_pos_w, d.root_quat_w, d.root_com_lin_vel_w, d.root_com_ang_vel_w)):
+            return "PHYSICS_UNSTABLE: NaN/Inf in the client state"
+        v = float(torch.norm(d.root_com_lin_vel_w[0]))
+        w = float(torch.norm(d.root_com_ang_vel_w[0]))
+        if v > cc.max_speed_mps:
+            return f"PHYSICS_UNSTABLE: client speed {v:.3f} m/s > {cc.max_speed_mps} (explosion)"
+        if w > cc.max_angular_rate_rad_s:
+            return f"PHYSICS_UNSTABLE: client angular rate {w:.4f} rad/s > {cc.max_angular_rate_rad_s}"
+        if self.state in MOVING_DOCKED and not self.task.docking.is_docked:
+            return "PHYSICS_UNSTABLE: MEP <-> client docking joint lost"
+        return None
+
+    ## States
+    def step_moving(self, s: State):
+        if s == State.CLIENT_RELEASE:
+            self.step_client_release()
+        elif s == State.CLIENT_CRUISE:
+            self.step_client_cruise()
+        elif s == State.CHASE:
+            self.step_chase()
+        elif s == State.VELOCITY_MATCHING:
+            self.step_velocity_matching()
+        elif s == State.RENDEZVOUS:
+            self.step_rendezvous()
+        elif s == State.STABILIZING:
+            self.step_stabilizing()
+        elif s == State.STOPPING:
+            self.step_stopping()
+        elif s == State.ROBOT_RELEASE:
+            self.step_robot_release()
+        elif s == State.ARM_RETREAT:
+            self.step_arm_retreat()
+        elif s == State.MRV_SEPARATION:
+            self.step_mrv_separation()
+
+    def client_release_thrust(self, elapsed_s: float) -> Optional[bool]:
+        """One step of the client release: thrust (F = m a, tau = I alpha) towards the
+        drift velocity. True once released (the thrust is off from then on), False while
+        thrusting, None after `release_timeout_s` (the caller fails the run)."""
+        cc = self.cfg.client
+        m = self._mvm
+        v_err = cc.velocity() - m["client_v_px"]  # free body: the PhysX velocity is exact
+        w_err = cc.angular_velocity() - m["client_w"]
+        if float(np.linalg.norm(v_err)) <= cc.velocity_tolerance_mps and float(np.linalg.norm(w_err)) <= cc.angular_tolerance_rad_s:
+            self.apply_wrench("client", np.zeros(3), np.zeros(3))
+            self._mv["release"] = {"time_s": elapsed_s, "sim_time_s": self.sim_time, "velocity_mps": m["client_v_px"].tolist()}
+            print(f"[MOVE] client released: v {np.round(m['client_v_px'], 5).tolist()} m/s after {elapsed_s:.1f} s of thrust, "
+                  f"now coasting (no force)", flush=True)
+            return True
+        if elapsed_s > cc.release_timeout_s:
+            return None
+        mass, inertia = self._body_mass_inertia(self.task._satellite)
+        a = bounded_accel(v_err, cc.release_time_constant_s, cc.release_accel_mps2)
+        alpha = bounded_accel(w_err, cc.release_time_constant_s, cc.release_ang_accel_rad_s2)
+        self.apply_wrench("client", mass * a, inertia @ alpha)
+        return False
+
+    def step_client_release(self):
+        """Sequential mode (`rendezvous.concurrent_docking: false`): thrust the client up to
+        its drift velocity with the arm holding, then CLIENT_CRUISE / CHASE / matching.
+        Timeout: CLIENT_RELEASE_FAILED."""
+        cc = self.cfg.client
+        self.hold()
+        done = self.client_release_thrust(self.state_time)
+        if done:
+            return self.goto(State.CLIENT_CRUISE if cc.cruise_check_s > 0.0 else self.after_cruise_state())
+        if done is None:
+            self.goto(State.CLIENT_RELEASE_FAILED, f"client velocity {np.round(self._mvm['client_v_px'], 5).tolist()} m/s did not reach "
+                                                   f"{cc.linear_velocity_mps} within {cc.release_timeout_s:.0f} s")
+
+    def concurrent_release_step(self):
+        """Concurrent mode: the release runs next to the docking transport (no waiting)."""
+        if "release" in self._mv or self.state in TERMINAL:
+            return
+        done = self.client_release_thrust(self.sim_time - float(self._mv["start_time_s"]))
+        if done is None:
+            cc = self.cfg.client
+            self.goto(State.CLIENT_RELEASE_FAILED, f"client velocity {np.round(self._mvm['client_v_px'], 5).tolist()} m/s did not reach "
+                                                   f"{cc.linear_velocity_mps} within {cc.release_timeout_s:.0f} s")
+
+    def insertion_gates(self, mep_speed: bool = True) -> Tuple[bool, List[str]]:
+        """Concurrent mode: what VELOCITY_MATCHING + RENDEZVOUS checked, now checked right
+        before the docking-axis approach (the transport does not need it, the insertion
+        does): client released, both relative speeds and the MRV station error small."""
+        rv = self.cfg.rendezvous
+        m = self._mvm
+        if "release" not in self._mv:
+            return False, ["client release still thrusting"]
+        ok, bad = matched(m["v_rel_mrv"], m["v_rel_mep"] if mep_speed else np.zeros(3),
+                          rv.max_mrv_client_relative_velocity_mps, rv.max_mep_client_relative_velocity_mps)
+        e = float(np.linalg.norm(m["e_mrv"]))
+        if e > rv.max_relative_position_m:
+            ok = False
+            bad.append(f"MRV station error {e*1000:.0f} mm > {rv.max_relative_position_m*1000:.0f} mm")
+        if ok and "matched" not in self._mv:
+            rec = {"time_s": self.sim_time - float(self._mv["start_time_s"]), "sim_time_s": self.sim_time,
+                   "v_rel_mrv_mps": self._speed(m["v_rel_mrv"]), "v_rel_mep_mps": self._speed(m["v_rel_mep"]),
+                   "client_speed_mps": self._speed(m["client_v"]), "mrv_speed_mps": self._speed(m["mrv_v"]),
+                   "mep_speed_mps": self._speed(m["mep_v"]), "station_error_m": e, "mep_relative_speed_gated": mep_speed}
+            self._mv["matched"] = rec
+            self._mv["rendezvous"] = dict(rec)
+            print(f"[MOVE] relative velocity / station gates passed before insertion: MRV-client {rec['v_rel_mrv_mps']*1000:.2f}, "
+                  f"MEP-client {rec['v_rel_mep_mps']*1000:.2f} mm/s, station error {e*1000:.1f} mm "
+                  f"(world speed {rec['client_speed_mps']*1000:.1f} mm/s)", flush=True)
+        return ok, bad
+
+    def step_client_cruise(self):
+        """Watch the free drift (Test 1): constant velocity, no gravity, no instability."""
+        cc = self.cfg.client
+        self.hold()
+        m = self._mvm
+        cr = self._mv.setdefault("cruise", {"t0": self.sim_time, "p0": m["client_p"].tolist(), "v0": m["client_v_px"].tolist(),
+                                            "max_dv_mps": 0.0, "max_dvz_mps": 0.0})
+        dv = m["client_v_px"] - np.asarray(cr["v0"])
+        cr["max_dv_mps"] = max(cr["max_dv_mps"], float(np.linalg.norm(dv)))
+        cr["max_dvz_mps"] = max(cr["max_dvz_mps"], abs(float(dv[2])))
+        if self.state_time < cc.cruise_check_s:
+            return
+        T = self.sim_time - cr["t0"]
+        disp = m["client_p"] - np.asarray(cr["p0"])
+        expected = np.asarray(cr["v0"]) * T
+        cr.update({"duration_s": T, "displacement_m": disp.tolist(), "expected_displacement_m": expected.tolist(),
+                   "displacement_error_m": float(np.linalg.norm(disp - expected)),
+                   "final_velocity_mps": m["client_v_px"].tolist()})
+        ok = (cr["max_dv_mps"] <= cc.cruise_max_velocity_change_mps
+              and float(np.linalg.norm(m["client_v_px"] - cc.velocity())) <= 2.0 * cc.velocity_tolerance_mps
+              and cr["displacement_error_m"] <= 0.01 * max(1e-3, float(np.linalg.norm(expected))) + 1e-3)
+        cr["pass"] = ok
+        print(f"[MOVE] client cruise {T:.1f} s: moved {np.round(disp, 4).tolist()} m (expected {np.round(expected, 4).tolist()}), "
+              f"max |dv| {cr['max_dv_mps']*1000:.3f} mm/s, max |dv_z| {cr['max_dvz_mps']*1000:.3f} mm/s", flush=True)
+        if ok:
+            self.goto(self.after_cruise_state())
+        else:
+            self.goto(State.CLIENT_RELEASE_FAILED, f"client drift not constant: max |dv| {cr['max_dv_mps']*1000:.3f} mm/s, "
+                                                   f"displacement error {cr['displacement_error_m']*1000:.1f} mm")
+
+    def after_cruise_state(self) -> State:
+        """CHASE only with `rendezvous.mrv_initial_velocity_mps` set (the spec's Test 2 setup)."""
+        return State.CHASE if self.cfg.rendezvous.chase_enabled else State.VELOCITY_MATCHING
+
+    def step_chase(self):
+        """MRV accelerates (open loop) to `rendezvous.mrv_initial_velocity_mps`."""
+        rv = self.cfg.rendezvous
+        self.hold()
+        target = rv.mrv_initial_velocity()
+        if float(np.linalg.norm(self._mv_ctrl.v - target)) < 1e-6:
+            m = self._mvm
+            self._mv["chase_end"] = {"time_s": self.sim_time, "client_v": m["client_v"].tolist(), "mrv_v": m["mrv_v"].tolist(),
+                                     "mep_v": None if m["mep_v"] is None else m["mep_v"].tolist(),
+                                     "station_error_m": float(np.linalg.norm(m["e_mrv"]))}
+            print(f"[MOVE] chase: MRV at {np.round(m['mrv_v'], 4).tolist()} m/s, client {np.round(m['client_v'], 4).tolist()} m/s, "
+                  f"MEP {np.round(m['mep_v'], 4).tolist() if m['mep_v'] is not None else 'n/a'} m/s -> closed-loop matching", flush=True)
+            self.goto(State.VELOCITY_MATCHING)
+        elif self.state_time > rv.chase_timeout_s:
+            self.goto(State.VELOCITY_MATCH_TIMEOUT, f"the MRV did not reach its chase velocity within {rv.chase_timeout_s:.0f} s")
+
+    def step_velocity_matching(self):
+        """|v_mrv - v_client| and |v_mep - v_client| below their limits for `stable_duration_sec`."""
+        rv = self.cfg.rendezvous
+        self.hold()
+        m = self._mvm
+        ok, bad = matched(m["v_rel_mrv"], m["v_rel_mep"], rv.max_mrv_client_relative_velocity_mps, rv.max_mep_client_relative_velocity_mps)
+        if self._mv_timer.update(ok, self.sim_time) >= rv.stable_duration_sec:
+            self._mv["matched"] = {"time_s": self.state_time, "sim_time_s": self.sim_time,
+                                   "v_rel_mrv_mps": self._speed(m["v_rel_mrv"]), "v_rel_mep_mps": self._speed(m["v_rel_mep"]),
+                                   "client_speed_mps": self._speed(m["client_v"]), "mrv_speed_mps": self._speed(m["mrv_v"]),
+                                   "mep_speed_mps": self._speed(m["mep_v"])}
+            print(f"[MOVE] velocity matched after {self.state_time:.1f} s: |v_mrv - v_client| {self._speed(m['v_rel_mrv'])*1000:.2f} mm/s, "
+                  f"|v_mep - v_client| {self._speed(m['v_rel_mep'])*1000:.2f} mm/s (world speeds: client {self._speed(m['client_v'])*1000:.1f}, "
+                  f"MRV {self._speed(m['mrv_v'])*1000:.1f}, MEP {self._speed(m['mep_v'])*1000:.1f} mm/s)", flush=True)
+            self.goto(State.RENDEZVOUS)
+        elif self.state_time > rv.velocity_match_timeout_s:
+            self.goto(State.VELOCITY_MATCH_TIMEOUT, "; ".join(bad) or "not held long enough")
+
+    def step_rendezvous(self):
+        """Station reached: |e_mrv| and both relative speeds within limits, held."""
+        rv = self.cfg.rendezvous
+        self.hold()
+        m = self._mvm
+        ok, bad = matched(m["v_rel_mrv"], m["v_rel_mep"], rv.max_mrv_client_relative_velocity_mps, rv.max_mep_client_relative_velocity_mps)
+        e = float(np.linalg.norm(m["e_mrv"]))
+        if e > rv.max_relative_position_m:
+            ok = False
+            bad.append(f"MRV station error {e*1000:.0f} mm > {rv.max_relative_position_m*1000:.0f} mm")
+        if self._mv_timer.update(ok, self.sim_time) >= rv.stable_duration_sec:
+            self._mv["rendezvous"] = {"time_s": self.state_time, "sim_time_s": self.sim_time, "station_error_m": e,
+                                      "v_rel_mrv_mps": self._speed(m["v_rel_mrv"]), "v_rel_mep_mps": self._speed(m["v_rel_mep"])}
+            print(f"[MOVE] rendezvous: MRV station error {e*1000:.1f} mm, relative speeds MRV {self._speed(m['v_rel_mrv'])*1000:.2f} / "
+                  f"MEP {self._speed(m['v_rel_mep'])*1000:.2f} mm/s -> docking (existing states, client moving at "
+                  f"{self._speed(m['client_v'])*1000:.1f} mm/s)", flush=True)
+            self.begin_docking()
+            self.goto(State.DOCK_TARGET_ACQUIRE)
+        elif self.state_time > rv.rendezvous_timeout_s:
+            self.goto(State.RENDEZVOUS_TIMEOUT, "; ".join(bad) or "not held long enough")
+
+    def forced_insertion(self) -> bool:
+        return self._mv_active and self.cfg.rendezvous.forced_insertion
+
+    def forced_corridor(self, m) -> Tuple[bool, List[str]]:
+        """Wider insertion corridor of the forced insertion + the nozzle-wall limit."""
+        rv, d = self.cfg.rendezvous, self.cfg.docking
+        if m["insertion_depth"] > 0.0:
+            clearance = m["clearance"]
+        else:  # before the exit plane: the gap to the exit rim
+            clearance = self.geo.nozzle.exit_radius - self.geo.probe.tip_radius - m["lateral"]
+        return moving_dock.insertion_corridor_ok(m["lateral"], m["axis_deg"], clearance, rv.insertion_max_lateral_m,
+                                                 rv.insertion_max_axis_deg, d.min_wall_clearance_m)
+
+    def forced_alignment_check(self, m):
+        """Forced insertion: start the axis approach as soon as the probe is inside the
+        wider corridor and the client / MRV side is ready -- no settle wait, no depth
+        calibration wait, no MEP relative-speed wait (the arm + payload swing is what
+        the corridor tolerates; DOCK_READY still checks the relative speed)."""
+        d = self.cfg.docking
+        ok, bad = self.forced_corridor(m)
+        if ok and self.cfg.rendezvous.concurrent_docking:
+            ok_mv, bad_mv = self.insertion_gates(mep_speed=False)
+            ok, bad = ok and ok_mv, bad + bad_mv
+        if self._depth_offset is None and d.auto_calibrate and d.depth_enabled:
+            self._calibrate_depth(m)  # opportunistic, on-axis samples only
+        if not ok:
+            self._dock_align_since = None
+            return self._dock_stage_timeout(m)
+        self._dock_align_since = self._dock_align_since if self._dock_align_since is not None else self.sim_time
+        if self.sim_time - self._dock_align_since >= d.align_hold_s:
+            self.results.check("[DOCK2] Alignment before the docking-axis approach", True,
+                               f"forced insertion corridor: lateral {m['lateral']*1000:.2f} mm (<= {self.cfg.rendezvous.insertion_max_lateral_m*1000:.0f}), "
+                               f"axis {m['axis_deg']:.3f} deg (<= {self.cfg.rendezvous.insertion_max_axis_deg:g}), held {d.align_hold_s:.1f} s")
+            print(f"[DOCK] forced insertion: starting the docking-axis approach (lateral {m['lateral']*1000:.1f} mm, "
+                  f"axis {m['axis_deg']:.2f} deg, remaining {m['geometry_distance']:.3f} m)", flush=True)
+            self.goto(State.Z_APPROACH)
+        else:
+            self._dock_stage_timeout(m)
+
+    def moving_dock_gates(self) -> Tuple[bool, List[str]]:
+        """Extra DOCK_READY conditions while the client moves (relative quantities only)."""
+        rv = self.cfg.rendezvous
+        m = self._mvm
+        bad = []
+        s_mrv, s_mep = self._speed(m["v_rel_mrv"]), self._speed(m["v_rel_mep"])
+        e = float(np.linalg.norm(m["e_mrv"]))
+        if not s_mrv <= rv.dock_max_mrv_client_relative_velocity_mps:
+            bad.append(f"MRV-client relative velocity {s_mrv*1000:.2f} mm/s > {rv.dock_max_mrv_client_relative_velocity_mps*1000:.1f}")
+        if not s_mep <= rv.dock_max_mep_client_relative_velocity_mps:
+            bad.append(f"MEP-client relative velocity {s_mep*1000:.2f} mm/s > {rv.dock_max_mep_client_relative_velocity_mps*1000:.1f}")
+        if not e <= rv.dock_max_relative_position_m:
+            bad.append(f"MRV station error {e*1000:.0f} mm > {rv.dock_max_relative_position_m*1000:.0f}")
+        return not bad, bad
+
+    def record_moving_dock(self):
+        """Test 3 evidence at the instant the docking joint is created."""
+        m = self._mvm
+        self._mv["dock"] = {
+            "sim_time_s": self.sim_time, "docked": bool(self.task.docking.is_docked),
+            "client_speed_mps": self._speed(m["client_v"]), "mep_speed_mps": self._speed(m["mep_v"]),
+            "mrv_speed_mps": self._speed(m["mrv_v"]),
+            "v_rel_mep_mps": self._speed(m["v_rel_mep"]), "v_rel_mrv_mps": self._speed(m["v_rel_mrv"]),
+            "station_error_m": float(np.linalg.norm(m["e_mrv"])),
+            "dock_position_error_m": m["dock_position_error"], "dock_orientation_error_deg": m["dock_orientation_error"],
+        }
+        print(f"[MOVE] docked while moving: world speeds client {self._mv['dock']['client_speed_mps']*1000:.1f} / MEP "
+              f"{self._mv['dock']['mep_speed_mps']*1000:.1f} / MRV {self._mv['dock']['mrv_speed_mps']*1000:.1f} mm/s, relative "
+              f"MEP-client {self._mv['dock']['v_rel_mep_mps']*1000:.2f} / MRV-client {self._mv['dock']['v_rel_mrv_mps']*1000:.2f} mm/s", flush=True)
+
+    def _docked_drift(self) -> Tuple[float, float]:
+        """MEP-client relative pose change since docking [m], [deg]."""
+        rel_now = self.probe_world().inv() @ self.sat_frame()
+        return pose_errors(rel_now, self._dock["rel_at_dock"])
+
+    def step_stabilizing(self):
+        """DOCKED -> the stack keeps drifting for `stabilization_sec`; the joint must hold."""
+        pd = self.cfg.post_docking
+        self.hold()
+        st = self._mv.setdefault("stabilizing", {"max_drift_mm": 0.0, "max_drift_deg": 0.0})
+        pe, ae = self._docked_drift()
+        st["max_drift_mm"] = max(st["max_drift_mm"], pe * 1000.0)
+        st["max_drift_deg"] = max(st["max_drift_deg"], ae)
+        if self.state_time < pd.stabilization_sec:
+            return
+        ok = self.task.docking.is_docked and st["max_drift_mm"] < pd.max_drift_mm and st["max_drift_deg"] < pd.max_drift_deg
+        st["pass"] = ok
+        if ok:
+            self.goto(State.STOPPING)
+        else:
+            self.goto(State.DOCK_FAILED, f"docked stack not stable: drift {st['max_drift_mm']:.2f} mm / {st['max_drift_deg']:.3f} deg")
+
+    def step_stopping(self):
+        """Common deceleration of client and MEP (F = m a), the MRV follows its station."""
+        pd = self.cfg.post_docking
+        self.hold()
+        m = self._mvm
+        a = bounded_accel(-m["client_v"], pd.stop_time_constant_s, pd.stop_accel_mps2)
+        alpha = bounded_accel(-m["client_w"], pd.stop_ang_time_constant_s, pd.stop_ang_accel_rad_s2)
+        m_c, i_c = self._body_mass_inertia(self.task._satellite)
+        m_m, i_m = self._body_mass_inertia(self.mep)
+        self.apply_wrench("client", m_c * a, i_c @ alpha)
+        self.apply_wrench("mep", m_m * a, i_m @ alpha)
+        speeds = [self._speed(m["client_v"]), self._speed(m["mep_v"]), self._speed(m["mrv_v"])]
+        rates = [float(np.linalg.norm(m["client_w"]))]
+        ok = stopped(speeds, rates, pd.stop_velocity_tolerance_mps, pd.stop_angular_tolerance_rad_s)
+        if self._mv_timer.update(ok, self.sim_time) >= pd.stop_hold_sec:
+            self.clear_wrenches()
+            pe, ae = self._docked_drift()
+            self._mv["stop"] = {"time_s": self.state_time, "client_speed_mps": speeds[0], "mep_speed_mps": speeds[1],
+                                "mrv_speed_mps": speeds[2], "client_rate_rad_s": rates[0],
+                                "mep_rate_physx_rad_s": float(np.linalg.norm(m["mep_w"])),
+                                "docked": bool(self.task.docking.is_docked), "drift_mm": pe * 1000.0, "drift_deg": ae}
+            print(f"[MOVE] stopped after {self.state_time:.1f} s: client {speeds[0]*1000:.3f}, MEP {speeds[1]*1000:.3f}, "
+                  f"MRV {speeds[2]*1000:.3f} mm/s, client rate {rates[0]:.5f} rad/s; docked {self.task.docking.is_docked}", flush=True)
+            self.goto(State.ROBOT_RELEASE)
+        elif self.state_time > pd.stop_timeout_s:
+            self.goto(State.STOP_FAILED, f"speeds {[round(s * 1000, 3) for s in speeds]} mm/s, client rate {rates[0]:.5f} rad/s "
+                                         f"after {pd.stop_timeout_s:.0f} s")
+
+    def step_robot_release(self):
+        """Remove ONLY the robot <-> MEP capture joint; the MEP <-> client joint stays."""
+        pd = self.cfg.post_docking
+        self.hold()
+        if "released_at" not in self._mv:
+            self._mv["released_at"] = self.sim_time
+            self.capture.release(0)  # removes `{ENV}/capture_joint` (CaptureManager)
+            print(f"[MOVE] robot <-> MEP attachment released ({self._mv['capture_joint']}); "
+                  f"MEP <-> client joint {self._mv['docking_joint']} kept (present: {self.task.docking.is_docked})", flush=True)
+        if self.state_time < pd.release_wait_sec:
+            return
+        attached, docked = self.capture.is_attached(0), bool(self.task.docking.is_docked)
+        pe, ae = self._docked_drift()
+        ok = not attached and docked
+        self._mv["robot_release"] = {"robot_mep_attached": attached, "mep_client_docked": docked,
+                                     "drift_mm": pe * 1000.0, "drift_deg": ae, "wait_s": self.state_time}
+        if ok:
+            if self.cfg.post_docking.immediate_release:
+                self.start_stack_stop()
+                self.goto(State.MRV_SEPARATION)
+            else:
+                self.goto(State.ARM_RETREAT)
+        elif self.state_time > pd.release_timeout_s:
+            self.goto(State.ROBOT_RELEASE_FAILED, f"robot<->MEP attached {attached}, MEP<->client docked {docked}")
+
+    def step_arm_retreat(self):
+        """Back the EE off the MEP face along its normal before the MRV moves at all."""
+        sp = self.cfg.separation
+        rt = self._mv.get("retreat_state")
+        if rt is None:
+            # The EE contact face is the controlled frame again (it was the probe tip)
+            self.arm.set_tool(self.geo.ee_contact_link)
+            start = self.ee_pose()
+            normal = self.mep_grasp_normal()  # out of the MEP face, towards the arm
+            rt = {"start": start, "normal": normal, "gap0": self._ee_face_gap(normal)}
+            self._mv["retreat_state"] = rt
+            self.ref = start
+            self.q_hold = None
+            print(f"[MOVE] arm retreat: {sp.arm_retreat_distance_m:.2f} m along the MEP face normal "
+                  f"{np.round(normal, 3).tolist()} (EE-face gap now {rt['gap0']*1000:.0f} mm)", flush=True)
+        goal = Frame(rt["start"].pos + sp.arm_retreat_distance_m * rt["normal"], rt["start"].rot)
+        self.goal = goal
+        self.track(goal, sp.arm_retreat_speed_mps, None)
+        pe, ae = pose_errors(self.ee_pose(), goal)
+        gap = self._ee_face_gap(rt["normal"])
+        if pe < 0.01 and ae < 1.0 and self.state_time > sp.arm_retreat_distance_m / sp.arm_retreat_speed_mps:
+            self.q_hold = None
+            self.hold()
+            self._mv["retreat"] = {"time_s": self.state_time, "gap_start_m": rt["gap0"], "gap_end_m": gap,
+                                   "docked": bool(self.task.docking.is_docked)}
+            print(f"[MOVE] arm retreated: EE-face gap {rt['gap0']*1000:.0f} -> {gap*1000:.0f} mm, MEP still docked "
+                  f"{self.task.docking.is_docked}", flush=True)
+            self.goto(State.MRV_SEPARATION)
+        elif self.state_time > sp.arm_retreat_timeout_s:
+            self.goto(State.ARM_RETREAT_FAILED, f"EE {pe*1000:.0f} mm / {ae:.2f} deg from the retreat pose after {sp.arm_retreat_timeout_s:.0f} s")
+
+    def _ee_face_gap(self, normal: np.ndarray) -> float:
+        """EE contact face distance in front of the MEP grasp face, along its normal [m]."""
+        face = self.mep_frame() @ self.geo.mep_grasp
+        return float((self.ee_pose().pos - face.pos) @ normal)
+
+    def step_mrv_separation(self):
+        """The MRV departs opposite the client's original drift.
+
+        Velocity-controlled from whatever the MRV is doing when it starts: with the
+        immediate release it is still moving with the client, so it first decelerates and
+        reverses (acceleration-limited), cruises `duration_sec` at `velocity_mps` along
+        the departure direction, then stops. The EE leaves the MEP face along its normal
+        (the departure direction is the approach axis reversed)."""
+        sp = self.cfg.separation
+        self.hold()
+        m = self._mvm
+        dist = float(np.linalg.norm(m["mrv_p"] - m["client_p"]))
+        sep = self._mv.get("separation")
+        if sep is None:
+            sep = {"dist0_m": dist, "max_increase_m": 0.0, "max_decrease_m": 0.0, "phase": "accelerate",
+                   "direction": self._mv_sep_dir.tolist(), "max_drift_mm": 0.0,
+                   "mrv_velocity_at_start_mps": self._mv_ctrl.v.tolist()}
+            self._mv["separation"] = sep
+            print(f"[MOVE] MRV separation along {np.round(self._mv_sep_dir, 3).tolist()} (= -client drift direction): "
+                  f"from {np.round(self._mv_ctrl.v * 1000, 1).tolist()} mm/s to {sp.velocity_mps*1000:.0f} mm/s, "
+                  f"{sp.duration_sec:.0f} s cruise, then stop", flush=True)
+        v_cruise = self._mv_sep_dir * sp.velocity_mps
+        if sep["phase"] == "accelerate" and float(np.linalg.norm(self._mv_ctrl.v - v_cruise)) < 1e-6:
+            sep["phase"], sep["cruise_t0"] = "cruise", self.sim_time
+        if sep["phase"] == "cruise" and self.sim_time - sep["cruise_t0"] >= sp.duration_sec:
+            sep["phase"] = "stop"
+        self._mv["sep_v_target"] = np.zeros(3) if sep["phase"] == "stop" else v_cruise
+        inc = dist - sep["dist0_m"]
+        sep["max_increase_m"] = max(sep["max_increase_m"], inc)
+        sep["max_decrease_m"] = max(sep["max_decrease_m"], sep["max_increase_m"] - inc)  # any approach back
+        pe, _ = self._docked_drift()
+        sep["max_drift_mm"] = max(sep["max_drift_mm"], pe * 1000.0)
+        sep["increase_m"] = inc
+        mrv_stopped = sep["phase"] == "stop" and float(np.linalg.norm(self._mv_ctrl.v)) < 1e-9
+        stack_done = not self._mv.get("stack_stop_active", False)
+        if mrv_stopped and stack_done:
+            ok = (inc >= sp.min_distance_increase_m and sep["max_decrease_m"] <= 0.005 and self.task.docking.is_docked
+                  and sep["max_drift_mm"] < self.cfg.post_docking.max_drift_mm)
+            sep.update({"time_s": self.state_time, "docked": bool(self.task.docking.is_docked), "pass": ok,
+                        "max_contact_n": float(self._mv.get("max_separation_contact_n", 0.0))})
+            if ok:
+                print(f"[MOVE] MISSION COMPLETE: MRV-client distance +{inc:.3f} m, MEP still docked (drift {sep['max_drift_mm']:.2f} mm)", flush=True)
+                self.goto(State.SUCCESS)
+            else:
+                self.goto(State.SEPARATION_FAILED, f"distance +{inc:.3f} m (>= {sp.min_distance_increase_m}), came back "
+                                                   f"{sep['max_decrease_m']*1000:.1f} mm, docked {self.task.docking.is_docked}, "
+                                                   f"drift {sep['max_drift_mm']:.2f} mm")
+        elif self.state_time > sp.timeout_s:
+            self.goto(State.SEPARATION_FAILED, f"departure not finished within {sp.timeout_s:.0f} s "
+                                               f"(phase {sep['phase']}, stack still stopping: {not stack_done})")
+
+    def start_stack_stop(self):
+        """After the release: the docked MEP + client stack stops by thrust (background)."""
+        self._mv["stack_stop_active"] = True
+        self._mv["stack_stop_t0"] = self.sim_time
+        print(f"[MOVE] MEP + client stack stopping (common deceleration, background) from "
+              f"{self._speed(self._mvm['client_v'])*1000:.1f} mm/s", flush=True)
+
+    def stack_stop_step(self):
+        """Common deceleration a = clip(-v / tau, a_max) as F = m a on client AND MEP (docked,
+        no longer held by the arm), until both are below the stop tolerance for `stop_hold_sec`."""
+        pd = self.cfg.post_docking
+        m = self._mvm
+        a = bounded_accel(-m["client_v"], pd.stop_time_constant_s, pd.stop_accel_mps2)
+        alpha = bounded_accel(-m["client_w"], pd.stop_ang_time_constant_s, pd.stop_ang_accel_rad_s2)
+        m_c, i_c = self._body_mass_inertia(self.task._satellite)
+        m_m, i_m = self._body_mass_inertia(self.mep)
+        self.apply_wrench("client", m_c * a, i_c @ alpha)
+        self.apply_wrench("mep", m_m * a, i_m @ alpha)
+        speeds = [self._speed(m["client_v"]), self._speed(m["mep_v"])]
+        rate = float(np.linalg.norm(m["client_w"]))
+        ok = stopped(speeds, [rate], pd.stop_velocity_tolerance_mps, pd.stop_angular_tolerance_rad_s)
+        held = self._mv.get("stack_stop_since")
+        if not ok:
+            self._mv["stack_stop_since"] = None
+        elif held is None:
+            self._mv["stack_stop_since"] = self.sim_time
+        elif self.sim_time - held >= pd.stop_hold_sec:
+            self.clear_wrenches()
+            self._mv["stack_stop_active"] = False
+            pe, ae = self._docked_drift()
+            self._mv["stop"] = {"time_s": self.sim_time - self._mv["stack_stop_t0"], "client_speed_mps": speeds[0],
+                                "mep_speed_mps": speeds[1], "mrv_speed_mps": math.nan, "client_rate_rad_s": rate,
+                                "mep_rate_physx_rad_s": float(np.linalg.norm(m["mep_w"])),
+                                "docked": bool(self.task.docking.is_docked), "drift_mm": pe * 1000.0, "drift_deg": ae}
+            print(f"[MOVE] MEP + client stack stopped after {self._mv['stop']['time_s']:.1f} s: client {speeds[0]*1000:.3f}, "
+                  f"MEP {speeds[1]*1000:.3f} mm/s (thrust off)", flush=True)
+            return
+        if self.sim_time - self._mv["stack_stop_t0"] > pd.stop_timeout_s:
+            self.goto(State.STOP_FAILED, f"stack speeds {[round(x * 1000, 3) for x in speeds]} mm/s after {pd.stop_timeout_s:.0f} s")
+
+    ## After every control step: MRV translation, thrust, telemetry
+    def moving_after_step(self):
+        if self.cfg.rendezvous.concurrent_docking:
+            self.concurrent_release_step()
+        s = self.state
+        dt = self.dt
+        ctrl = self._mv_ctrl
+        m = self._mvm
+        if self._mv.get("stack_stop_active") and s not in TERMINAL:
+            self.stack_stop_step()
+        immediate = self.cfg.post_docking.immediate_release
+        if s == State.MRV_SEPARATION:
+            ctrl.toward(self._mv.get("sep_v_target", np.zeros(3)), dt, a_max=self.cfg.separation.accel_mps2)
+            self.mrv.apply(self.mrv.offset + ctrl.v * dt)
+        else:
+            if s == State.CHASE:
+                ctrl.toward(self.cfg.rendezvous.mrv_initial_velocity(), dt)
+            elif (s in MRV_TRACKS_CLIENT or (s in FAILURES and self.capture.is_attached(0))
+                  or (s == State.ROBOT_RELEASE and immediate)
+                  or (s in (State.CLIENT_RELEASE, State.CLIENT_CRUISE) and self.cfg.rendezvous.mrv_follow_during_release)):
+                # Station keeping on the client: v = v_client + Kp e (relative position)
+                ctrl.track(m["mrv_p"], m["client_p"], m["client_v"], self._mv_d_ref, dt)
+            else:
+                ctrl.toward(np.zeros(3), dt)
+            self.mrv.apply(self.mrv.offset + ctrl.v * dt)
+        if self.vfx is not None:
+            # Plume only while the MRV accelerates, exhausting against the acceleration
+            thrust = ctrl.a if float(np.linalg.norm(ctrl.a)) > 1e-4 else None
+            try:
+                self.vfx.update(None if thrust is None else -thrust, self.mrv.offset)
+            except Exception as e:
+                print(f"[MRV-VFX] update failed ({e}); the plume is switched off", flush=True)
+                self.vfx = None
+        lg = self.cfg.logging
+        if lg.motion_trail and self.sim_time >= self._next_trail_t:
+            self._next_trail_t = self.sim_time + lg.motion_trail_period_s - 1e-9
+            for key, p in (("client", m["client_p"]), ("mep", m["mep_p"]), ("mrv", self.mrv.root_pos())):
+                pts = self._trail[key]
+                pts.append(np.asarray(p, dtype=float).copy())
+                if len(pts) > int(lg.motion_trail_max_points):
+                    del pts[1]  # keep the start point: it is the world-fixed reference
+        if self.sim_time >= self._next_mv_log_t:
+            self._next_mv_log_t = self.sim_time + 1.0 / self.cfg.logging.rate_hz - 1e-9
+            self.log_moving_row()
+            self.update_motion_hud()
+            # (the docking states draw their own scene, `update_dock_visuals`, with these vectors)
+            if self.cfg.logging.debug_draw and s not in DOCKING_STATES:
+                self.update_moving_visuals()
+
+    ## Telemetry / visualisation
+    VELOCITY_ARROW_S = 100.0  # arrow length = v * this [s]: 0.02 m/s -> 2 m
+
+    def moving_vectors(self) -> List[Tuple[np.ndarray, np.ndarray, tuple, float]]:
+        """Debug-draw segments: body velocities, relative position, departure direction."""
+        m = self._mvm
+        if not m:
+            return []
+        k = self.VELOCITY_ARROW_S
+        probe, dock = self.probe_world().pos, self.dock_world().pos
+        out = []
+        for p, v, col in ((dock, m["client_v"], (0.2, 1.0, 0.2, 1.0)),
+                          (probe, m["mep_v"], (1.0, 0.55, 0.0, 1.0)),
+                          (m["mrv_p"], m["mrv_v"], (0.2, 0.6, 1.0, 1.0))):
+            if v is not None:
+                out.append((p, p + k * np.asarray(v), col, 4))
+        out.append((probe, dock, (1.0, 1.0, 1.0, 1.0), 2))  # MEP docking point -> client docking point
+        if self._mv_sep_dir is not None and self.state in (State.ARM_RETREAT, State.MRV_SEPARATION, State.SUCCESS):
+            out.append((m["mrv_p"], m["mrv_p"] + 3.0 * self._mv_sep_dir, (1.0, 0.2, 0.9, 1.0), 3))
+        if self.cfg.logging.motion_trail:
+            out += self.trail_segments()
+        return out
+
+    TRAIL_COLORS = {"client": (0.2, 1.0, 0.2), "mep": (1.0, 0.55, 0.0), "mrv": (0.2, 0.6, 1.0)}
+
+    def trail_segments(self) -> List[Tuple[np.ndarray, np.ndarray, tuple, float]]:
+        """Path of each body since the release (a tick every trail point) and a
+        world-fixed cross at its start: the drift is read against the cross."""
+        out = []
+        for key, pts in self._trail.items():
+            if not pts:
+                continue
+            rgb = self.TRAIL_COLORS[key]
+            line, tick, cross = (*rgb, 0.8), (*rgb, 1.0), (*rgb, 1.0)
+            for a, b in zip(pts[:-1], pts[1:]):
+                out.append((a, b, line, 2))
+            for p in pts[1:]:
+                out.append((p - np.array([0.0, 0.0, 0.08]), p + np.array([0.0, 0.0, 0.08]), tick, 2))
+            s = pts[0]
+            for axis in np.eye(3):
+                out.append((s - 0.5 * axis, s + 0.5 * axis, cross, 4))
+            if len(pts) > 1:
+                out.append((s, pts[-1], (*rgb, 0.35), 1))  # start -> now (total displacement)
+        return out
+
+    def open_motion_hud(self):
+        """GUI window with the live speeds (visual only, never gates the run)."""
+        if self.headless or not self.cfg.logging.motion_hud or self._hud is not None:
+            return
+        try:
+            import omni.ui as ui
+
+            self._hud = ui.Window("Docking monitor", width=560, height=360, position_x=700, position_y=60)
+            with self._hud.frame:
+                with ui.VStack(spacing=4):
+                    self._hud_labels = [ui.Label("", height=24, style={"font_size": 18}) for _ in range(12)]
+            print("[VIS] opened the 'Docking monitor' window", flush=True)
+        except Exception as e:
+            self._hud = None
+            print(f"[VIS] speed window unavailable ({e}); the trail and the CSV still show the motion", flush=True)
+
+    def update_motion_hud(self, dm: Optional[Dict[str, float]] = None):
+        """Refresh the monitor window. Moving client: speeds + docking lines; static
+        docking: `dm` (the `dock_metrics` of this step) only."""
+        if self._hud is None or not self._hud_labels:
+            return
+        try:
+            d = self.cfg.docking
+            lines = [f"state      {self.state.value}   t = {self.sim_time:6.1f} s"]
+            if self._mv_active and self._mvm:
+                m = self._mvm
+                moved = {k: (float(np.linalg.norm(v[-1] - v[0])) if len(v) > 1 else 0.0) for k, v in self._trail.items()}
+                sep = self._mv.get("separation", {})
+                lines += [
+                    f"client  |v| {self._speed(m['client_v'])*1000:6.1f} mm/s   moved {moved['client']:6.2f} m",
+                    f"MEP     |v| {self._speed(m['mep_v'])*1000:6.1f} mm/s   moved {moved['mep']:6.2f} m",
+                    f"MRV     |v| {self._speed(m['mrv_v'])*1000:6.1f} mm/s   moved {moved['mrv']:6.2f} m",
+                    f"relative  MEP-client {self._speed(m['v_rel_mep'])*1000:5.2f}   MRV-client {self._speed(m['v_rel_mrv'])*1000:5.2f} mm/s",
+                    f"MRV station error {float(np.linalg.norm(m['e_mrv']))*1000:6.1f} mm   separation {float(sep.get('increase_m', 0.0)):+.3f} m",
+                ]
+                axis, lateral, roll, dist = m["dock_axis_deg"], m["dock_lateral_m"], m["dock_roll_deg"], m["dock_position_error"]
+            elif dm is not None:
+                sat = self.task._satellite.data
+                lines += [
+                    f"satellite |v| {float(torch.norm(sat.root_com_lin_vel_w[0]))*1000:6.1f} mm/s   "
+                    f"MEP |v| {float(torch.norm(self.mep.data.root_com_lin_vel_w[0]))*1000:6.1f} mm/s",
+                    f"relative probe-satellite {dm['rel_speed']*1000:6.1f} mm/s",
+                    f"remaining insertion {dm['geometry_distance']:.3f} m   depth {dm['depth_distance']:.3f} m "
+                    f"({'ok' if dm['depth_ok'] else 'HOLD'})",
+                ]
+                axis, lateral, roll = dm["axis_deg"], dm["lateral"], dm["roll_deg"]
+                dist = float(math.hypot(dm["lateral"], dm["axial"]))
+            else:
+                ## MRV approach / capture phase (ground truth, display only)
+                v_mep = float(torch.norm(self.mep.data.root_com_lin_vel_w[0]))
+                w_mep = math.degrees(float(torch.norm(self.mep.data.root_com_ang_vel_w[0])))
+                g = self.gt_capture_metrics()
+                leg_v = self._leg.v if self._leg is not None else 0.0
+                off = self.mrv.offset if self.mrv is not None else np.zeros(3)
+                lines += [
+                    f"MRV  |v| {leg_v*1000:6.1f} mm/s   offset from nominal {float(np.linalg.norm(off)):5.2f} m",
+                    f"MEP  |v| {v_mep*1000:6.1f} mm/s   |w| {w_mep:5.2f} deg/s",
+                    *([f"client |v| {self._speed(self._mvm.get('client_v_px'))*1000:6.1f} mm/s   moved "
+                       f"{(float(np.linalg.norm(self._trail['client'][-1] - self._trail['client'][0])) if len(self._trail['client']) > 1 else 0.0):6.2f} m"]
+                      if self._client_live else []),
+                    f"EE -> Cylinder_01 {g['distance']:.3f} m   gap {g['gap']*1000:7.1f} mm",
+                    f"lateral {g['lateral']*1000:6.1f} mm   angle {g['angle']:5.2f} deg   (capture <= {self.cfg.capture.max_lateral_m*1000:.0f} mm, "
+                    f"{self.cfg.capture.max_angle_deg:g} deg)",
+                    f"EE-MEP relative velocity {g['rel_vel']*1000:6.1f} mm/s   (capture <= {self.cfg.capture.max_relative_velocity_mps*1000:.0f})",
+                    f"tags {len(self.last_vision.detections) if self.last_vision else 0}/4   "
+                    f"robot-MEP {'ATTACHED' if self.capture.is_attached(0) else 'free'}",
+                ]
+                for k, label in enumerate(self._hud_labels):
+                    label.text = lines[k] if k < len(lines) else ""
+                return
+            forced = self.forced_insertion()
+            ab_ax = self.cfg.rendezvous.insertion_max_axis_deg if forced else d.approach_abort_axis_deg
+            ab_lat = self.cfg.rendezvous.insertion_max_lateral_m if forced else d.approach_abort_lateral_m
+            lines += [
+                f"probe-nozzle axis {axis:5.2f} deg   (align <= {d.align_axis_deg:g}, abort > {ab_ax:g})",
+                f"lateral {lateral*1000:6.1f} mm   (align <= {d.align_lateral_m*1000:.0f}, abort > {ab_lat*1000:.0f})   roll {roll:5.2f} deg",
+                f"probe tip -> dock point {dist:.3f} m{'   [forced insertion]' if forced else ''}",
+                f"robot-MEP {'ATTACHED' if self.capture.is_attached(0) else 'released'}   "
+                f"MEP-client {'DOCKED' if self.task.docking.is_docked else 'free'}",
+            ]
+            for k, label in enumerate(self._hud_labels):
+                label.text = lines[k] if k < len(lines) else ""
+        except Exception as e:
+            print(f"[VIS] monitor window update failed ({e}); closing it", flush=True)
+            self._hud = None
+
+    def update_moving_visuals(self):
+        probe, dock = self.probe_world(), self.dock_world()
+        self.vis.set_scene([], None, probe.pos, dock.pos, None, self.ee_pose().pos, None,
+                           axes=[(probe, 0.5, 3, 1.0), (dock, 0.5, 3, 0.6)], vectors=self.moving_vectors())
+        self.vis.show()
+
+    def log_moving_row(self):
+        m = self._mvm
+        if not m:
+            return
+
+        def xyz(prefix, v):
+            v = np.full(3, math.nan) if v is None else np.asarray(v, dtype=float)
+            return {f"{prefix}_{a}": float(x) for a, x in zip("xyz", v)}
+
+        rel_mrv = relative(m["mrv_p"], m["client_p"])
+        dist = float(np.linalg.norm(rel_mrv))
+        sep = self._mv.get("separation")
+        row = {"run_id": self.label, "timestamp": round(self.sim_time, 4), "state": self.state.value,
+               **xyz("client_position", m["client_p"]), **xyz("client_velocity", m["client_v"]),
+               **xyz("client_physx_velocity", m["client_v_px"]), **xyz("client_angular_velocity", m["client_w"]),
+               **xyz("mep_position", m["mep_p"]), **xyz("mep_velocity", m["mep_v"]),
+               **xyz("mep_physx_velocity", m["mep_v_px"]), **xyz("mep_angular_velocity", m["mep_w"]),
+               **xyz("mrv_position", m["mrv_p"]), **xyz("mrv_velocity", m["mrv_v"]),
+               **xyz("mrv_measured_velocity", m["mrv_v_fd"]), **xyz("mrv_acceleration", m["mrv_a"]),
+               **xyz("mep_client_relative_position", m["rel_mep_client"]),
+               "mep_client_relative_position": float(np.linalg.norm(m["rel_mep_client"])),
+               **xyz("mep_client_relative_velocity", m["v_rel_mep"]), "mep_client_relative_velocity": self._speed(m["v_rel_mep"]),
+               **xyz("mrv_client_relative_position", rel_mrv), "mrv_client_relative_position": dist,
+               **xyz("mrv_station_error", m["e_mrv"]), "mrv_station_error": float(np.linalg.norm(m["e_mrv"])),
+               **xyz("mrv_client_relative_velocity", m["v_rel_mrv"]), "mrv_client_relative_velocity": self._speed(m["v_rel_mrv"]),
+               "docking_position_error": m["dock_position_error"], "docking_orientation_error": m["dock_orientation_error"],
+               "robot_mep_attached": int(self.capture.is_attached(0)), "mep_client_docked": int(self.task.docking.is_docked),
+               "mrv_client_distance": dist,
+               "separation_distance": (dist - sep["dist0_m"]) if sep else 0.0,
+               **xyz("client_force", self._mv_force.get("client", np.zeros(3))), **xyz("mep_force", self._mv_force.get("mep", np.zeros(3))),
+               "arm_contact_force": m["contact_n"]}
+        row = {k: (round(float(v), 7) if isinstance(v, (float, np.floating)) else v) for k, v in row.items()}
+        self._mv_rows.append(row)
+        if self._mv_csv is not None:
+            self._mv_csv.writerow({k: row.get(k, "") for k in moving_dock.CSV_COLUMNS})
+
+    def moving_status(self):
+        m = self._mvm
+        if not m:
+            return
+        print(f"[MOVE] t={self.sim_time:6.1f}s {self.state.value:<18} |v| client {self._speed(m['client_v'])*1000:5.1f} "
+              f"MEP {self._speed(m['mep_v'])*1000:5.1f} MRV {self._speed(m['mrv_v'])*1000:5.1f} mm/s | rel.v MEP "
+              f"{self._speed(m['v_rel_mep'])*1000:5.2f} MRV {self._speed(m['v_rel_mrv'])*1000:5.2f} mm/s | station err "
+              f"{float(np.linalg.norm(m['e_mrv']))*1000:6.1f} mm | robot-MEP {'Y' if self.capture.is_attached(0) else 'n'} "
+              f"MEP-client {'Y' if self.task.docking.is_docked else 'n'} | contact {m['contact_n']:.1f} N | "
+              f"wall {time.time() - self.wall_start:.0f} s", flush=True)
+
+    def _finish_moving(self):
+        """Tests 1-6 of the moving-client scenario, judged on what was measured."""
+        c = self.cfg
+        r = self.results
+        mv = self._mv
+        r.metrics["moving"] = {k: v for k, v in mv.items() if k not in ("retreat_state",)}
+        cr = mv.get("cruise")
+        if c.client.cruise_check_s > 0.0:
+            r.check("[MOVE1] Client free flight", bool(cr and cr.get("pass")),
+                    (f"{cr['duration_s']:.1f} s coasting: max |dv| {cr['max_dv_mps']*1000:.3f} mm/s (<= {c.client.cruise_max_velocity_change_mps*1000:.1f}), "
+                     f"max |dv_z| {cr['max_dvz_mps']*1000:.3f} mm/s, displacement error {cr['displacement_error_m']*1000:.2f} mm")
+                    if cr and "duration_s" in cr else "not reached")
+        else:  # not a failure and not a pass: the test did not run
+            r.metrics["moving"]["test1"] = "skipped (client.cruise_check_s = 0); run with --set client.cruise_check_s=5.0"
+        ce, mt = mv.get("chase_end"), mv.get("matched")
+        if ce and mt:
+            detail = (f"from client {self._speed(ce['client_v'])*1000:.1f} / MRV {self._speed(ce['mrv_v'])*1000:.1f} / "
+                      f"MEP {self._speed(ce['mep_v'])*1000:.1f} mm/s to |v_mrv - v_client| {mt['v_rel_mrv_mps']*1000:.2f}, "
+                      f"|v_mep - v_client| {mt['v_rel_mep_mps']*1000:.2f} mm/s in {mt['time_s']:.1f} s")
+        elif mt:
+            detail = (f"MRV kept its station from the release (no chase): |v_mrv - v_client| {mt['v_rel_mrv_mps']*1000:.2f}, "
+                      f"|v_mep - v_client| {mt['v_rel_mep_mps']*1000:.2f} mm/s at world speed {mt['client_speed_mps']*1000:.1f} mm/s")
+        else:
+            detail = "not reached"
+        r.check("[MOVE2] Velocity matching", bool(mt), detail)
+        dk = mv.get("dock")
+        v_cmd = float(np.linalg.norm(c.client.velocity()))
+        ok3 = bool(dk and dk["docked"] and dk["client_speed_mps"] > 0.5 * v_cmd
+                   and dk["v_rel_mep_mps"] <= c.rendezvous.dock_max_mep_client_relative_velocity_mps
+                   and dk["v_rel_mrv_mps"] <= c.rendezvous.dock_max_mrv_client_relative_velocity_mps)
+        r.check("[MOVE3] Moving docking", ok3,
+                (f"FixedJoint created with the client moving at {dk['client_speed_mps']*1000:.1f} mm/s (world); relative "
+                 f"MEP-client {dk['v_rel_mep_mps']*1000:.2f}, MRV-client {dk['v_rel_mrv_mps']*1000:.2f} mm/s" if dk else "not reached"))
+        st = mv.get("stop")
+        r.check("[MOVE4] Post-docking stop", bool(st and st["docked"]),
+                (f"client {st['client_speed_mps']*1000:.3f}, MEP {st['mep_speed_mps']*1000:.3f}, MRV {st['mrv_speed_mps']*1000:.3f} mm/s "
+                 f"(<= {c.post_docking.stop_velocity_tolerance_mps*1000:.1f}), client rate {st['client_rate_rad_s']:.5f} rad/s, "
+                 f"MEP-client drift {st['drift_mm']:.2f} mm" if st else "not reached"))
+        rr = mv.get("robot_release")
+        r.check("[MOVE5] Robot release (robot<->MEP released, MEP<->client kept)",
+                bool(rr and not rr["robot_mep_attached"] and rr["mep_client_docked"]),
+                (f"capture joint present {rr['robot_mep_attached']}, docking joint present {rr['mep_client_docked']}, "
+                 f"MEP-client drift {rr['drift_mm']:.2f} mm" if rr else "not reached"))
+        sep = mv.get("separation")
+        r.check("[MOVE6] MRV separation", bool(sep and sep.get("pass")),
+                (f"MRV-client distance +{sep['increase_m']:.3f} m (>= {c.separation.min_distance_increase_m}), MEP docked "
+                 f"{sep.get('docked')}, max arm contact {float(mv.get('max_separation_contact_n', 0.0)):.1f} N "
+                 f"(<= {c.separation.max_contact_force_n:.0f}), MEP-client drift {sep['max_drift_mm']:.2f} mm" if sep and "increase_m" in sep else "not reached"))
+        if self._mv_csv is not None:
+            r.check("[MOVE] CSV generated", len(self._mv_rows) > 0, f"{len(self._mv_rows)} rows -> {self.moving_csv_path}")
 
     ## Depth calibration / logging
     def set_dock_ring_color(self, rgb):
@@ -2085,6 +3236,8 @@ class VisionCaptureDemo:
         self.set_dock_ring_color(col[:3])
         axes = [(probe, 0.8, 5, 1.0), (dock, 0.8, 5, 0.6), (pre, 0.4, 2, 0.4)]
         vectors = [(probe.pos, dock.pos, col, 3)]
+        if self._mv_active:
+            vectors += self.moving_vectors()
         self.vis.set_scene([], pre.pos, probe.pos, dock.pos, None, self.ee_pose().pos, None,
                            axes=axes, vectors=vectors)
         self.vis.show()
@@ -2106,8 +3259,16 @@ class VisionCaptureDemo:
         `docking.depth_surface_offset_m` assumes the ray lands on the nozzle back plate,
         but that plate is a collision-only prim, so the real surface is the thruster mesh
         behind it. Both values are logged so the assumption is visible.
+
+        Only on-axis samples count (`probe_dock.depth_calibration_sample_ok`): the offset
+        is the median of `depth_calibration_samples` of them.
         """
-        if not math.isfinite(m["depth_raw"]) or m["depth_pixels"] < 4:
+        d = self.cfg.docking
+        ok, why = probe_dock.depth_calibration_sample_ok(d, m)
+        if not ok:
+            if self._dock.get("calib_wait_reason") != why.split(" ")[0]:
+                self._dock["calib_wait_reason"] = why.split(" ")[0]
+                print(f"[DOCK] depth calibration waiting for the docking axis: {why}", flush=True)
             return
         measured = m["depth_raw"] - self._cam_to_tip - m["geometry_distance"]
         # Fail-safe: a ray that missed the nozzle gives a nonsense offset. The surface
@@ -2119,18 +3280,27 @@ class VisionCaptureDemo:
                       f"[-0.5, 3.0] m (raw {m['depth_raw']:.3f} m, geometry {m['geometry_distance']:.3f} m); "
                       f"the ray is not landing inside the nozzle", flush=True)
             return
-        self._depth_offset = float(measured)
+        samples = self._dock.setdefault("calib_samples", [])
+        samples.append(float(measured))
+        if len(samples) < int(d.depth_calibration_samples):
+            return
+        self._depth_offset = float(np.median(samples))
         self._depth_calibrated_t = self.sim_time
         cfgd = self.cfg.docking.depth_surface_offset_m
         self.results.metrics.setdefault("docking", {})["depth_calibration"] = {
             "measured_surface_offset_m": self._depth_offset,
+            "samples": len(samples),
+            "sample_spread_m": float(np.ptp(samples)),
+            "lateral_at_calibration_m": m["lateral"],
+            "axis_at_calibration_deg": m["axis_deg"],
             "configured_surface_offset_m": cfgd,
             "backstop_gap_m": float(self.task.cfg.docking.backstop_gap),
             "geometry_distance_m": m["geometry_distance"],
             "depth_raw_m": m["depth_raw"],
             "camera_to_tip_m": self._cam_to_tip,
         }
-        print(f"[DOCK] depth calibration at the pre-dock pose: raw {m['depth_raw']:.3f} m, geometry {m['geometry_distance']:.3f} m "
+        print(f"[DOCK] depth calibration at the pre-dock pose (on the axis: lateral {m['lateral']*1000:.1f} mm, axis {m['axis_deg']:.2f} deg; "
+              f"median of {len(samples)}, spread {np.ptp(samples)*1000:.1f} mm): raw {m['depth_raw']:.3f} m, geometry {m['geometry_distance']:.3f} m "
               f"-> surface offset {self._depth_offset:.3f} m (configured {cfgd:.3f} m, back plate at {self.task.cfg.docking.backstop_gap:.3f} m)", flush=True)
 
     def log_dock_row(self, m):
@@ -2322,6 +3492,8 @@ class VisionCaptureDemo:
             vectors.append((est_now.pos, est_now.pos + v * self.vis.VELOCITY_ARROW_SEC, "velocity", 3))
         if est_now is not None and pred is not None:
             vectors.append((est_now.pos, pred.pos, "pred", 2))  # future position prediction
+        if self._client_live and self.cfg.logging.motion_trail:
+            vectors += self.trail_segments()  # cleared before every image the tags are detected in
         self.vis.set_scene(tags_w, centre, est, gt.pos, pred.pos if pred else None, ee.pos, goal.pos if goal else None,
                            axes=axes, vectors=vectors)
 
@@ -2432,6 +3604,8 @@ class VisionCaptureDemo:
     def status(self):
         if self.state in MRV_STATES:
             return self.mrv_status()
+        if self._mv_active:
+            return self.moving_status()
         lv = self.last_vision
         m = self.capture_metrics(self.gt_cylinder(), self.gt_mep_velocity_at(self.ee_pose().pos)[0])
         print(f"[STATUS] t={self.sim_time:6.1f}s {self.state.value:<16} tags {len(lv.detections) if lv else 0}/4 "
@@ -2489,6 +3663,12 @@ class VisionCaptureDemo:
                     sim.render()
                     continue
                 self.step()
+                if self._mv_active:
+                    # MRV translation (after the arm's IK used this step's base frame),
+                    # client/MEP thrust, telemetry
+                    self.moving_after_step()
+                elif self._client_live:
+                    self.client_live_step()  # client drifting since t = 0 (MRV still static)
                 scene.write_data_to_sim()
                 sim.step(render=False)
                 n += 1
@@ -2497,7 +3677,8 @@ class VisionCaptureDemo:
                 # Neither the docking phase nor the MRV rendezvous phase uses the wrist
                 # camera / AprilTags (the tag search starts once the arm is deployed)
                 vision_due = (rendered and self.sim_time >= self._next_vision_t - 1e-9
-                              and self.state not in DOCKING_STATES and self.state not in MRV_STATES)
+                              and self.state not in DOCKING_STATES and self.state not in MRV_STATES
+                              and not self._mv_active)
                 if rendered:
                     if vision_due:
                         self.vis.clear()  # keep debug draw out of the image used for detection
@@ -2518,6 +3699,8 @@ class VisionCaptureDemo:
                 if self.sim_time >= self._next_log_t:
                     self._next_log_t = self.sim_time + 1.0 / self.cfg.logging.rate_hz - 1e-9
                     self.log_row()
+                    if not self._mv_active and self.state not in DOCKING_STATES:
+                        self.update_motion_hud()  # MRV approach / capture lines
                 if self.sim_time >= self._next_status_t and self.state not in DOCKING_STATES:
                     self._next_status_t = self.sim_time + 2.0
                     self.status()
@@ -2526,6 +3709,8 @@ class VisionCaptureDemo:
             self._csv_file.close()
         if self._dock_csv_file is not None:
             self._dock_csv_file.close()
+        if self._mv_csv_file is not None:
+            self._mv_csv_file.close()
         if self.ros is not None:
             self.publish_ros()  # final state (latched topics keep it for late subscribers)
             self.ros.close()
@@ -2587,6 +3772,8 @@ class VisionCaptureDemo:
             self._finish_dynamic(csv_ok, missing)
         if c.docking.enabled:
             self._finish_docking()
+        if self.moving:
+            self._finish_moving()
         self._write_video()
         return r
 

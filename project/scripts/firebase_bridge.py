@@ -38,17 +38,28 @@ TELEMETRY = "session_telemetry"
 TERMINAL_STATES = {
     "SUCCESS", "TAG_LOST", "POSE_INVALID", "PREDICTION_INVALID", "APPROACH_TIMEOUT", "CAPTURE_FAILED",
     "PHYSICS_ERROR", "ABORTED", "DOCK_FAILED", "MRV_APPROACH_FAILED",
+    # moving client (`--moving_dock`)
+    "CLIENT_RELEASE_FAILED", "VELOCITY_MATCH_TIMEOUT", "RENDEZVOUS_TIMEOUT", "STOP_FAILED",
+    "ROBOT_RELEASE_FAILED", "ARM_RETREAT_FAILED", "SEPARATION_COLLISION", "SEPARATION_FAILED",
 }
-# Docking done and held: the demo keeps running, the session is complete
-FINISHED_STATES = {"DOCK_HOLDING"}
-# MRV rendezvous / arm deployment: neither capture nor docking (telemetry phase "MISSION")
-MISSION_STATES = {"MRV_MOVE_STEP_1", "MRV_STEP_1_REACHED", "MRV_MOVE_STEP_2", "MRV_STEP_2_REACHED", "ARM_DEPLOY"}
+# Non-terminal states that also complete the session (none: the release / retreat /
+# departure after the docking still belong to the run, which ends at SUCCESS)
+FINISHED_STATES: set = set()
+# Neither capture nor docking (telemetry phase "MISSION"): MRV rendezvous / arm deployment,
+# and the moving-client states around the docking (client release, chase, velocity
+# matching, rendezvous; stabilise, stop, robot release, arm retreat, MRV departure)
+MISSION_STATES = {"MRV_MOVE_STEP_1", "MRV_STEP_1_REACHED", "MRV_MOVE_STEP_2", "MRV_STEP_2_REACHED", "ARM_DEPLOY",
+                  "CLIENT_RELEASE", "CLIENT_CRUISE", "CHASE", "VELOCITY_MATCHING", "RENDEZVOUS",
+                  "STABILIZING", "STOPPING", "ROBOT_RELEASE", "ARM_RETREAT", "MRV_SEPARATION"}
 # Terminal failure state -> stage of the mission it belongs to (`failure_stage`)
 FAILURE_STAGES = {
     "TAG_LOST": "VISION", "POSE_INVALID": "VISION", "PREDICTION_INVALID": "VISION",
     "APPROACH_TIMEOUT": "APPROACH", "MRV_APPROACH_FAILED": "APPROACH",
     "CAPTURE_FAILED": "CAPTURE", "DOCK_FAILED": "DOCKING",
     "PHYSICS_ERROR": "PHYSICS", "ABORTED": "ABORTED",
+    "CLIENT_RELEASE_FAILED": "APPROACH", "VELOCITY_MATCH_TIMEOUT": "APPROACH", "RENDEZVOUS_TIMEOUT": "APPROACH",
+    "STOP_FAILED": "DOCKING", "ROBOT_RELEASE_FAILED": "RELEASE", "ARM_RETREAT_FAILED": "RELEASE",
+    "SEPARATION_COLLISION": "SEPARATION", "SEPARATION_FAILED": "SEPARATION",
 }
 
 

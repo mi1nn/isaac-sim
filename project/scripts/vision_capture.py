@@ -13,6 +13,9 @@ Must run with the Isaac Sim Python (the same interpreter `srb` uses):
     # Full pipeline (the default: 6-DoF MEP, start yaw 15 deg, MRV rendezvous + capture + docking, ROS 2 on,
     # tag full_6dof) -- --no_dock / --no_ros / --start_yaw_deg 0 / --tag NAME switch those off or change them
     ~/isaac-sim/python.sh project/scripts/vision_capture.py
+    # Moving client -- the satellite drifts (+X 0.02 m/s), MRV + MEP match its velocity, dock
+    # while moving, stop, release the MEP, retreat the arm and depart (-X); --dock_only skips the capture
+    ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --headless --tag moving --dock_only --moving_dock
     # ... the same run without the rendezvous phase (the arm starts at the observation pose)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --dock --no_mrv_approach
     # GUI (debug draw + camera overlay images); after a success the simulation keeps
@@ -49,6 +52,10 @@ def parse_args():
     parser.add_argument("--no_dock", action="store_true", help="Capture only: skip the docking phase")
     parser.add_argument("--dock_only", action="store_true",
                         help="--dock, but skip the capture: attach the MEP at its nominal grasp pose and dock straight away")
+    parser.add_argument("--moving_dock", action="store_true",
+                        help="--dock with a drifting client: release -> chase -> velocity matching -> rendezvous -> docking "
+                             "-> stop -> robot release -> arm retreat -> MRV departure (config `client:`, `rendezvous:`, "
+                             "`post_docking:`, `separation:`); combine with --dock_only to skip the capture")
     parser.add_argument("--no_mrv_approach", action="store_true",
                         help="Skip the MRV rendezvous phase (folded arm -> two translation legs -> arm deploy) "
                              "and start with the arm at the observation pose, as before (config `mrv:`)")
@@ -143,10 +150,14 @@ def main():
         sets.append("mrv.enabled=true")
     if args.dock and args.no_dock:
         sys.exit("[ARGS] --dock and --no_dock are mutually exclusive")
+    if args.moving_dock and args.no_dock:
+        sys.exit("[ARGS] --moving_dock and --no_dock are mutually exclusive")
     if args.no_dock:
         sets.append("docking.enabled=false")
-    elif args.dock or args.dock_only:
+    elif args.dock or args.dock_only or args.moving_dock:
         sets.append("docking.enabled=true")
+    if args.moving_dock:
+        sets.append("client.release_enabled=true")
     if args.dock_only:
         sets.append("docking.skip_capture=true")
         # The docking-only path attaches the MEP at its nominal grasp pose in `start()`,
@@ -203,7 +214,9 @@ def main():
         print(f"[SUMMARY] results: {result_path}", flush=True)
         print(f"[SUMMARY] telemetry: {csv_path}", flush=True)
         state["ok"] = n_ok == len(results.checks)
-        if not args.headless and state["ok"] and not args.exit_when_done:
+        # Keep the scene up after the run reached SUCCESS, even if a report-only check
+        # failed (the exit code below still carries every check)
+        if not args.headless and results.final_state == "SUCCESS" and not args.exit_when_done:
             demo.idle()  # results are already written; keep the scene up until the window closes
         env.close()
 
