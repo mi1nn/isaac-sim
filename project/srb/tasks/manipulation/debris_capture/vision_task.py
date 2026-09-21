@@ -247,6 +247,15 @@ class VisionCaptureTask(DockingTask):
         ## rotation_start "diverge": no back-rotation -> the MEP starts in the nominal
         ## orientation (position still passes the nominal at t_r) and turns away from it
         omega_back = omega if v.mep.rotation_start == "converge" else np.zeros(3)
+        ## Unchanged by the MRV rendezvous phase: this stays the pose the capture
+        ## pipeline was verified with. That phase instead rolls the whole free-flying
+        ## MEP *back* by its own duration once the simulation is up and the centre of
+        ## mass is known (`VisionCaptureDemo.roll_back_free_bodies`), so the MEP reaches
+        ## this exact state when the capture takes over rather than when the simulation
+        ## starts. Stretching `rendezvous_time_s` instead was tried and does not work:
+        ## PhysX turns the body about its COM, 6.6 m from Cylinder_01, so a 3.6x longer
+        ## back-rotation moved Cylinder_01 ~0.3 m off the nominal pose and only 2 of the
+        ## 4 tags were still in the camera at the handover (measured).
         mep_start = rendezvous_start_pose(mep_nominal, self.t_m_y, drift, omega_back, v.mep.rendezvous_time_s)
         set_prim_pose(stage, mep_path, mep_start)
         for cfg in (self.cfg.scene.debris, self.scene["debris"].cfg):

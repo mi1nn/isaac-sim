@@ -16,7 +16,15 @@ through a fixed transform), the EE reference and joint feed-forward follow the M
 angular velocity, and the capture also requires a small relative angular velocity.
 `translation_only` (default) keeps the Phase 1 behaviour.
 
+`mrv.enabled` puts the MRV rendezvous phase (`mrv_approach.py`) in front of all of
+this: the arm starts folded, the MRV (Canadarm3 base + spacecraft hull) translates to
+its nominal pose in two legs with a thruster plume, and the arm is then deployed into
+the pose the capture pipeline starts from. The MEP drifts and turns the whole time --
+nothing in that phase touches it, the capture, the transport or the docking.
+
 States (Section 26 of the task spec):
+    [mrv.enabled: INIT -> MRV_MOVE_STEP_1 -> MRV_STEP_1_REACHED -> MRV_MOVE_STEP_2
+     -> MRV_STEP_2_REACHED -> ARM_DEPLOY ->] SEARCH ...
     INIT -> SEARCH -> TAG_DETECTED -> POSE_ESTIMATED -> PREDICTING -> APPROACHING
     -> SLOW_APPROACH -> CAPTURE_ATTEMPT -> CAPTURED -> HOLDING -> RETREAT -> SUCCESS
     static scenario: ... PREDICTING -> STATIC_MEASURE -> SUCCESS
@@ -39,6 +47,16 @@ import torch
 from .docking_demo import ArmKinematics, interp_frame
 from . import probe_dock
 from .frames import Frame, axis_angle, rotation_angle
+from .mrv_approach import (
+    MrvTransit,
+    ThrusterVfx,
+    TransitLeg,
+    back_propagate_free_body,
+    joint_lerp,
+    joint_span_deg,
+    smoothstep,
+    wrap_joint_target,
+)
 from .vision import (
     yaw_about_base,
     PROJECT_DIR,
@@ -69,6 +87,14 @@ if TYPE_CHECKING:
 
 class State(Enum):
     INIT = "INIT"
+    ## MRV rendezvous phase (`mrv.enabled`, `mrv_approach.py`). Purely in front of the
+    ## capture pipeline: SEARCH onwards is reached in exactly the state the verified
+    ## pipeline starts in (MRV at its nominal pose, arm at the observation / yawed pose).
+    MRV_MOVE_STEP_1 = "MRV_MOVE_STEP_1"
+    MRV_STEP_1_REACHED = "MRV_STEP_1_REACHED"
+    MRV_MOVE_STEP_2 = "MRV_MOVE_STEP_2"
+    MRV_STEP_2_REACHED = "MRV_STEP_2_REACHED"
+    ARM_DEPLOY = "ARM_DEPLOY"
     SEARCH = "SEARCH"
     TAG_DETECTED = "TAG_DETECTED"
     POSE_ESTIMATED = "POSE_ESTIMATED"
@@ -89,6 +115,7 @@ class State(Enum):
     CAPTURE_FAILED = "CAPTURE_FAILED"
     PHYSICS_ERROR = "PHYSICS_ERROR"
     ABORTED = "ABORTED"  # ROS cmd/abort
+    MRV_APPROACH_FAILED = "MRV_APPROACH_FAILED"
     ## Phase 2 -- Ares1 probe -> satellite thruster docking (`probe_dock.py`).
     ## Enabled by `docking.enabled` (`vision_capture.py --dock`); the capture states
     ## above are unchanged and hand over after HOLDING / RETREAT.
@@ -106,7 +133,12 @@ class State(Enum):
 
 
 FAILURES = {State.TAG_LOST, State.POSE_INVALID, State.PREDICTION_INVALID, State.APPROACH_TIMEOUT, State.CAPTURE_FAILED, State.PHYSICS_ERROR,
-            State.ABORTED, State.DOCK_FAILED}
+            State.ABORTED, State.DOCK_FAILED, State.MRV_APPROACH_FAILED}
+# MRV rendezvous phase: no vision, no capture, no docking runs in any of them
+MRV_STATES = {State.MRV_MOVE_STEP_1, State.MRV_STEP_1_REACHED, State.MRV_MOVE_STEP_2,
+              State.MRV_STEP_2_REACHED, State.ARM_DEPLOY}
+# ... of which these translate the MRV (the only states with the thruster plume on)
+MRV_MOTION = {State.MRV_MOVE_STEP_1, State.MRV_MOVE_STEP_2}
 # States of the docking phase (the probe tip is the controlled frame in all of them)
 DOCKING_STATES = {State.DOCK_TARGET_ACQUIRE, State.PRE_DOCK_APPROACH, State.XY_ALIGN, State.ORIENTATION_ALIGN,
                   State.ALIGNMENT_CHECK, State.Z_APPROACH, State.FINAL_INSERTION, State.DOCK_READY,
@@ -425,6 +457,21 @@ class VisionCaptureDemo:
         # six_dof: GT pose at t = 0 for the runtime angular-velocity frame check
         self._w_frame_ref: Optional[Tuple[float, Frame]] = None
         self._w_frame_result: Optional[dict] = None
+        ## MRV rendezvous phase (`mrv_approach.py`). All of it is inactive -- and every
+        ## handle below stays None -- when `mrv.enabled` is false, so the verified
+        ## capture / transport / docking pipeline runs exactly as before.
+        self.mrv: Optional[MrvTransit] = None
+        self.vfx: Optional[ThrusterVfx] = None
+        self._leg: Optional[TransitLeg] = None
+        self._leg_targets: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._q_folded: Optional[torch.Tensor] = None
+        self._q_deployed: Optional[torch.Tensor] = None
+        self._deploy_alpha = 0.0
+        self._mrv_log: Dict[str, object] = {}
+        # sim_time at which the capture pipeline takes over (SEARCH). Every capture-phase
+        # deadline is measured from here, so `test.dynamic_timeout_sec` keeps its meaning
+        # whether or not the approach ran ahead of it.
+        self._capture_t0 = 0.0
 
         ## Output
         self.out_dir = out_dir
@@ -823,7 +870,13 @@ class VisionCaptureDemo:
                 print(f"[SEARCH] arm starts swung {a.start_yaw_offset_deg:+.1f} deg in azimuth from the observation pose", flush=True)
             self.task._robot.set_joint_position_target(q, joint_ids=self.arm.joint_ids)
             self.q_hold = q.clone()
+            # The pose the capture pipeline starts from is also the deployment target of
+            # the MRV phase, so the arm arrives in exactly the verified start state.
+            self._q_deployed = q.clone()
         self.ref = self.ee_pose()
+        ## MRV rendezvous phase: fold the arm and back the MRV off to its start pose
+        if c.mrv.enabled:
+            self.begin_mrv_approach()
         ## Docking phase reported next to the capture setup
         if c.docking.enabled:
             geo = self.geo
@@ -860,6 +913,266 @@ class VisionCaptureDemo:
                     self.goto(State.DOCK_TARGET_ACQUIRE)
                 else:
                     self.goto(State.DOCK_FAILED, "skip_capture could not attach the MEP at the nominal grasp pose")
+
+    ############################
+    ### MRV rendezvous phase ###
+    ############################
+
+    def begin_mrv_approach(self):
+        """Fold the arm, displace the MRV to its start pose and prepare the plume layer.
+
+        Runs inside `start()`, before the first physics step, and only when
+        `mrv.enabled`. It changes nothing about the MEP, the capture, the transport or
+        the docking: the two legs cancel the displacement exactly, so the capture
+        pipeline takes over in the configuration it was verified in.
+        """
+        m = self.cfg.mrv
+        r = self.results
+        if self.cfg.docking.enabled and self.cfg.docking.skip_capture:
+            # `skip_capture` closes the arm on the MEP at its nominal grasp pose right
+            # here in `start()`; there is no capture to approach, so the phase is skipped
+            print("[MRV] rendezvous phase skipped: docking.skip_capture attaches the MEP at its nominal grasp pose", flush=True)
+            return
+        if self._q_deployed is None:
+            # `approach.start_at_observe_pose: false` leaves no planned start pose for
+            # the arm, so there is nothing to deploy into
+            r.check("[MRV] Deployment target available", False,
+                    "mrv.enabled requires approach.start_at_observe_pose: true (the deployed pose is the pipeline's start pose)")
+            self.goto(State.MRV_APPROACH_FAILED, "no deployment target (approach.start_at_observe_pose is false)")
+            return
+
+        ## Folded arm -- commanded through the same joint targets the rest of the demo uses
+        q_folded = torch.tensor(m.folded_joint_rad(), dtype=self._q_deployed.dtype,
+                                device=self._q_deployed.device).reshape(self._q_deployed.shape)
+        self._q_folded = q_folded
+        # The IK that planned the deployed pose returns whatever multiple of a turn it
+        # happened to converge to (the Canadarm3 joints are continuous). Interpolating to
+        # that number would spin the joints for thousands of degrees, so the target is
+        # re-expressed within +-180 deg of the folded pose -- the same arm configuration.
+        q_raw_deg = np.degrees(self._q_deployed[0].cpu().numpy())
+        self._q_deployed = wrap_joint_target(q_folded, self._q_deployed)
+        q_dep_deg = np.degrees(self._q_deployed[0].cpu().numpy())
+        if float(np.abs(q_dep_deg - q_raw_deg).max()) > 1.0:
+            print(f"[MRV] deployed joint target unwound to the shortest turn: "
+                  f"{np.round(q_raw_deg, 1).tolist()} -> {np.round(q_dep_deg, 1).tolist()} deg", flush=True)
+        self.arm.set_kinematic(q_folded)
+        self.task._robot.set_joint_position_target(q_folded, joint_ids=self.arm.joint_ids)
+        self.q_hold = q_folded.clone()
+        ee_folded = self.ee_pose()
+        self.ref = ee_folded
+        base = self.arm.base
+        reach_folded = float(np.linalg.norm(ee_folded.pos - base.pos))
+        self.arm.set_kinematic(self._q_deployed)
+        reach_deployed = float(np.linalg.norm(self.ee_pose().pos - base.pos))
+        self.arm.set_kinematic(q_folded)
+        span = joint_span_deg(m.folded_joint_deg, np.degrees(self._q_deployed[0].cpu().numpy()).tolist())
+        r.check("[MRV] Arm starts folded", reach_folded < 0.6 * reach_deployed,
+                f"EE contact point {reach_folded:.2f} m from the base folded vs {reach_deployed:.2f} m deployed, "
+                f"largest joint travel to deploy {span:.1f} deg",
+                folded_reach_m=reach_folded, deployed_reach_m=reach_deployed)
+
+        ## MRV start pose: nominal + start_offset (translation only, both legs cancel it)
+        try:
+            self.mrv = MrvTransit(self.task, self.arm)
+            self.mrv.apply(m.offset())
+        except Exception as e:  # a broken transit must not silently run the old pipeline
+            self.mrv = None
+            r.check("[MRV] Two-step approach available", False, f"the MRV could not be displaced: {e}")
+            self.goto(State.MRV_APPROACH_FAILED, f"MRV placement failed: {e}")
+            return
+        self._leg_targets = m.leg_targets()
+        d1, d2 = m.leg_distances()
+        r.check("[MRV] Two translation legs are separately visible", min(d1, d2) > 0.5,
+                f"leg 1 {d1:.2f} m, leg 2 {d2:.2f} m (start offset {m.start_offset_m} m, "
+                f"planned {m.leg_time_s(d1):.1f} s + {m.leg_time_s(d2):.1f} s at {m.speed_mps} m/s)",
+                leg1_m=d1, leg2_m=d2)
+        self.roll_back_free_bodies(m.roll_back_s())
+        self._mrv_log = {
+            "start_offset_m": m.offset().tolist(),
+            "leg1_target_offset_m": self._leg_targets[0].tolist(),
+            "leg1_distance_m": d1,
+            "leg2_distance_m": d2,
+            "folded_joint_deg": list(m.folded_joint_deg),
+            "deployed_joint_deg": np.degrees(self._q_deployed[0].cpu().numpy()).tolist(),
+            "folded_reach_m": reach_folded,
+            "deployed_reach_m": reach_deployed,
+            "planned_duration_s": m.planned_duration_s(),
+            "roll_back_s": m.roll_back_s(),
+        }
+        r.metrics["setup"]["mrv_approach"] = self._mrv_log
+        print(f"[MRV] start offset {np.round(m.offset(), 2).tolist()} m from the nominal pose; "
+              f"leg 1 {d1:.2f} m -> offset {np.round(self._leg_targets[0], 2).tolist()}, leg 2 {d2:.2f} m -> nominal. "
+              f"Arm folded at {np.round(m.folded_joint_deg, 1).tolist()} deg", flush=True)
+
+        ## Thruster plume: separate prims, visual only, never gates the pipeline
+        if m.vfx_enabled:
+            try:
+                self.vfx = ThrusterVfx(self.task, m, hull_nominal=self.mrv.hull_nominal)
+            except Exception as e:
+                self.vfx = None
+                print(f"[MRV-VFX] disabled: the plume layer could not be created ({e}); "
+                      "the approach and the rest of the pipeline continue unchanged", flush=True)
+        self._mrv_log["vfx"] = self.vfx is not None
+
+    def roll_back_free_bodies(self, dt: float):
+        """Roll the free-flying MEP (and a drifting satellite) back by `dt` seconds.
+
+        The scene places them so the capture pipeline meets the MEP at its nominal
+        rendezvous pose `mep.rendezvous_time_s` after the pipeline starts. The rendezvous
+        phase adds `dt` seconds in front of it, so the bodies are put where free flight
+        would have brought them from `dt` seconds earlier: at the handover they are then
+        in exactly the state the verified run has at its own t = 0, and the placement
+        itself (`vision_task`) is untouched.
+
+        This is the only pose written here, it happens in `start()` before the first
+        physics step (as `skip_capture` does), and the velocities are not touched -- the
+        MEP keeps the `six_dof` twist it was configured with.
+        """
+        if dt <= 0.0:
+            return
+        c = self.cfg
+        v_mep, w_mep = c.mep.linear_velocity_w(), c.mep.angular_velocity_w()
+        nominal = self.mep_frame()
+        start = back_propagate_free_body(nominal, v_mep, w_mep, self.com_in_mep, dt)
+        self.mep.write_root_pose_to_sim(
+            torch.tensor([[*start.pos, *start.quat]], dtype=torch.float32, device=self.mep.device)
+        )
+        moved = [f"MEP {float(np.linalg.norm(start.pos - nominal.pos)):.3f} m / "
+                 f"{math.degrees(rotation_angle(nominal.rot, start.rot)):.2f} deg"]
+        ## The satellite is translation-only in this phase (`docking.satellite_velocity_mps`,
+        ## 0 by default, in which case nothing below changes its pose)
+        sat = getattr(self.task, "_satellite", None)
+        v_sat = np.asarray(c.docking.satellite_drift_direction, dtype=float) * float(c.docking.satellite_velocity_mps)
+        if sat is not None and float(np.linalg.norm(v_sat)) > 0.0:
+            s_now = Frame.from_pos_quat(sat.data.root_pos_w[0].tolist(), sat.data.root_quat_w[0].tolist())
+            s_start = Frame(s_now.pos - v_sat * dt, s_now.rot)
+            sat.write_root_pose_to_sim(
+                torch.tensor([[*s_start.pos, *s_start.quat]], dtype=torch.float32, device=sat.device)
+            )
+            moved.append(f"satellite {float(np.linalg.norm(v_sat)) * dt:.3f} m")
+        self.sim.forward()
+        self.mep.update(1e-6)
+        if sat is not None:
+            sat.update(1e-6)
+        self._w_frame_ref = (self.sim_time, self.mep_frame())  # the 6-DoF frame check restarts here
+        print(f"[MRV] free bodies rolled back {dt:.1f} s (the planned approach + deployment time) so the capture "
+              f"starts from the verified rendezvous state: {', '.join(moved)}", flush=True)
+
+    def start_leg(self, index: int):
+        """Begin translation leg 1 or 2 towards its target offset."""
+        m = self.cfg.mrv
+        target = self._leg_targets[index - 1]
+        self._leg = TransitLeg(self.mrv.offset, target, m.speed_mps, m.accel_mps2)
+        print(f"[MRV] leg {index}: {self._leg.length:.2f} m along {np.round(self._leg.dir, 3).tolist()} "
+              f"at up to {m.speed_mps:.2f} m/s (planned {m.leg_time_s(self._leg.length):.1f} s)", flush=True)
+
+    def step_mrv_leg(self, index: int, reached: State):
+        """One control step of a translation leg (the arm holds its folded joints)."""
+        m = self.cfg.mrv
+        self.hold()
+        if self._leg is None:
+            self.start_leg(index)
+        offset = self._leg.step(self.dt)
+        self.mrv.apply(offset)
+        self.update_thruster_vfx()
+        err = self.mrv.error_m(self._leg.target)
+        if self._leg.done(1e-6) and err <= m.position_tolerance_m:
+            print(f"[MRV] leg {index} complete: offset {np.round(self.mrv.offset, 3).tolist()} m, "
+                  f"measured base error {err*1000:.1f} mm (tolerance {m.position_tolerance_m*1000:.0f} mm), "
+                  f"t={self.sim_time:.1f} s", flush=True)
+            self._mrv_log[f"leg{index}_end_error_mm"] = err * 1000.0
+            self._mrv_log[f"leg{index}_end_time_s"] = self.sim_time
+            self._leg = None
+            self.goto(reached)
+        elif self.state_time > m.stage_timeout_s:
+            self.goto(State.MRV_APPROACH_FAILED,
+                      f"translation leg {index} did not reach its target within {m.stage_timeout_s:.0f} s "
+                      f"(remaining {self._leg.remaining:.3f} m, base error {err*1000:.1f} mm)")
+
+    def step_mrv_reached(self, nxt: State):
+        """Hold still between the two legs (the plume is off: the MRV is not thrusting)."""
+        self.hold()
+        self.update_thruster_vfx()
+        if self.state_time >= self.cfg.mrv.settle_time_s:
+            self.goto(nxt)
+
+    def step_arm_deploy(self):
+        """Unfold the arm into the pose the capture pipeline starts from.
+
+        Joint-space interpolation with an ease-in/ease-out profile, so no joint is
+        stepped: q(t) = q_folded + smoothstep(t / duration) * (q_deployed - q_folded).
+        """
+        m = self.cfg.mrv
+        self.update_thruster_vfx()  # off: the MRV is not translating any more
+        u = self.state_time / max(1e-6, m.deploy_duration_s)
+        self._deploy_alpha = smoothstep(u)
+        q = joint_lerp(self._q_folded, self._q_deployed, self._deploy_alpha)
+        self.task._robot.set_joint_position_target(q, joint_ids=self.arm.joint_ids)
+        self.q_hold = q.clone()
+        self.set_velocity_feedforward(None)
+        settled = self.state_time >= m.deploy_duration_s and (
+            math.degrees(float(torch.max(torch.abs(self.arm.joint_pos() - self._q_deployed)))) < m.deploy_tolerance_deg
+        )
+        if settled or self.state_time >= m.deploy_duration_s + m.deploy_settle_s:
+            q_err = float(torch.max(torch.abs(self.arm.joint_pos() - self._q_deployed)))
+            pe, ae = pose_errors(self.ee_pose(), self._deployed_ee_pose())
+            self.results.check("[MRV] Arm deployed to the pipeline start pose", math.degrees(q_err) < 1.0,
+                               f"max joint error {math.degrees(q_err):.3f} deg, EE {pe*1000:.1f} mm / {ae:.3f} deg from the planned start pose",
+                               max_joint_error_deg=math.degrees(q_err))
+            self._mrv_log["deploy_end_time_s"] = self.sim_time
+            self._mrv_log["deploy_joint_error_deg"] = math.degrees(q_err)
+            self.enter_capture_pipeline()
+        elif self.state_time > m.stage_timeout_s:
+            self.goto(State.MRV_APPROACH_FAILED, f"the arm was not deployed within {m.stage_timeout_s:.0f} s")
+
+    def _deployed_ee_pose(self) -> Frame:
+        """EE contact pose of the planned deployed joint configuration (no teleporting)."""
+        return self.observe_pose if self.cfg.approach.start_yaw_offset_deg == 0.0 else yaw_about_base(
+            self.observe_pose, self.arm.base, self.cfg.approach.start_yaw_offset_deg
+        )
+
+    def enter_capture_pipeline(self):
+        """Hand over to the existing capture pipeline, which starts its own clock here."""
+        err = self.mrv.error_m(np.zeros(3)) if self.mrv is not None else 0.0
+        self.results.check("[MRV] MRV arrived at its nominal pose", err <= self.cfg.mrv.position_tolerance_m,
+                           f"articulation root {err*1000:.1f} mm from the nominal (verified) pose "
+                           f"(tolerance {self.cfg.mrv.position_tolerance_m*1000:.0f} mm)", mrv_arrival_error_mm=err * 1000.0)
+        self.thruster_vfx_off()
+        self._capture_t0 = self.sim_time
+        self._mrv_log["capture_start_time_s"] = self._capture_t0
+        self.results.metrics["mrv_approach"] = dict(self._mrv_log)
+        gt = self.gt_cylinder()
+        nominal = (self.task.mep_nominal @ self.t_m_y).pos
+        print(f"[MRV] approach complete at t={self.sim_time:.1f} s -- handing over to the capture pipeline. "
+              f"MEP Cylinder_01 is {float(np.linalg.norm(gt.pos - nominal))*1000:.0f} mm from its nominal rendezvous pose "
+              f"(it kept drifting and turning throughout)", flush=True)
+        self.ref = self.ee_pose()
+        self.goto(State.SEARCH)
+
+    def update_thruster_vfx(self):
+        """Plume on only while a leg is running, pointing opposite the commanded motion."""
+        if self.vfx is None:
+            return
+        direction = None
+        if self.state in MRV_MOTION and self._leg is not None and self._leg.v > 1e-4:
+            direction = -self._leg.dir  # exhaust leaves opposite the direction of travel
+        try:
+            self.vfx.update(direction, self.mrv.offset if self.mrv is not None else np.zeros(3))
+        except Exception as e:
+            print(f"[MRV-VFX] update failed ({e}); the plume is switched off and the pipeline continues", flush=True)
+            self.vfx = None
+
+    def thruster_vfx_off(self):
+        if self.vfx is None:
+            return
+        try:
+            self.vfx.off()
+        except Exception:
+            pass
+
+    def capture_clock(self) -> float:
+        """Simulated time since the capture pipeline took over (0 without the MRV phase)."""
+        return self.sim_time - self._capture_t0
 
     def idle(self):
         """GUI after a successful run: keep simulating (MEP held) until the window closes."""
@@ -903,7 +1216,7 @@ class VisionCaptureDemo:
         if s in TRACKING | {State.PREDICTING} and self.estimate_age() > c.vision.tag_loss_timeout_s:
             self.goto(State.TAG_LOST, f"no valid constellation pose for {self.estimate_age():.2f} s (last: {self.last_vision.reason if self.last_vision else 'none'})")
             s = self.state
-        if self.scenario == "dynamic" and s in TRACKING and self.sim_time > c.test.dynamic_timeout_sec:
+        if self.scenario == "dynamic" and s in TRACKING and self.capture_clock() > c.test.dynamic_timeout_sec:
             self.goto(State.APPROACH_TIMEOUT, f"no capture within {c.test.dynamic_timeout_sec:.0f} s")
             s = self.state
 
@@ -914,7 +1227,17 @@ class VisionCaptureDemo:
         if s == State.INIT:
             self.hold()
             if self.state_time >= 0.5:
-                self.goto(State.SEARCH)
+                self.goto(State.MRV_MOVE_STEP_1 if self.mrv is not None else State.SEARCH)
+        elif s == State.MRV_MOVE_STEP_1:
+            self.step_mrv_leg(1, State.MRV_STEP_1_REACHED)
+        elif s == State.MRV_STEP_1_REACHED:
+            self.step_mrv_reached(State.MRV_MOVE_STEP_2)
+        elif s == State.MRV_MOVE_STEP_2:
+            self.step_mrv_leg(2, State.MRV_STEP_2_REACHED)
+        elif s == State.MRV_STEP_2_REACHED:
+            self.step_mrv_reached(State.ARM_DEPLOY)
+        elif s == State.ARM_DEPLOY:
+            self.step_arm_deploy()
         elif s == State.SEARCH:
             if a.start_at_observe_pose and a.start_yaw_offset_deg == 0.0:
                 self.hold()
@@ -1191,7 +1514,11 @@ class VisionCaptureDemo:
         if self.capture.is_attached(0):
             print(f"[CAPTURE] CAPTURED  t={self.sim_time:.2f} s  (FixedJoint {self.capture._joint_prim_paths[0]})", flush=True)
             self._capture_info = {
-                "time_s": self.sim_time,
+                # Measured from the start of the capture pipeline (= sim_time unless the
+                # MRV rendezvous phase ran ahead of it), which is what
+                # `test.dynamic_timeout_sec` has always meant
+                "time_s": self.capture_clock(),
+                "sim_time_s": self.sim_time,
                 "vision": m,
                 "gt": m_gt,
                 "ee_speed_mps": float(np.linalg.norm(self.ee_velocity())),
@@ -2088,11 +2415,24 @@ class VisionCaptureDemo:
         })
 
     def status(self):
+        if self.state in MRV_STATES:
+            return self.mrv_status()
         lv = self.last_vision
         m = self.capture_metrics(self.gt_cylinder(), self.gt_mep_velocity_at(self.ee_pose().pos)[0])
         print(f"[STATUS] t={self.sim_time:6.1f}s {self.state.value:<16} tags {len(lv.detections) if lv else 0}/4 "
               f"standoff {self.standoff:.3f} m | GT: dist {m['distance']:.3f} m gap {m['gap']*1000:7.1f} mm lat {m['lateral']*1000:6.1f} mm "
               f"ang {m['angle']:.2f} deg rel.v {m['rel_vel']*1000:.1f} mm/s | wall {time.time() - self.wall_start:.0f} s", flush=True)
+
+    def mrv_status(self):
+        """Progress line of the rendezvous phase (no vision runs in it)."""
+        off = self.mrv.offset if self.mrv is not None else np.zeros(3)
+        leg = f"{self._leg.remaining:5.2f} m left at {self._leg.v:.2f} m/s" if self._leg is not None else "-"
+        mep = self.gt_cylinder().pos - (self.task.mep_nominal @ self.t_m_y).pos
+        print(f"[STATUS] t={self.sim_time:6.1f}s {self.state.value:<18} MRV offset {np.round(off, 2).tolist()} m | {leg} | "
+              f"arm {'folded' if self.state is not State.ARM_DEPLOY else f'deploying {100.0 * self._deploy_alpha:3.0f} %'} | "
+              f"plume {'ON' if (self.vfx is not None and self.vfx.visible) else 'off'} | "
+              f"MEP {float(np.linalg.norm(mep)):.2f} m from its rendezvous pose (still drifting) | "
+              f"wall {time.time() - self.wall_start:.0f} s", flush=True)
 
     ###################
     ### Main loop ###
@@ -2139,9 +2479,10 @@ class VisionCaptureDemo:
                 n += 1
                 self.sim_time += self.dt
                 rendered = n % self.render_interval == 0
-                # The docking phase does not use the wrist camera / AprilTags at all
+                # Neither the docking phase nor the MRV rendezvous phase uses the wrist
+                # camera / AprilTags (the tag search starts once the arm is deployed)
                 vision_due = (rendered and self.sim_time >= self._next_vision_t - 1e-9
-                              and self.state not in DOCKING_STATES)
+                              and self.state not in DOCKING_STATES and self.state not in MRV_STATES)
                 if rendered:
                     if vision_due:
                         self.vis.clear()  # keep debug draw out of the image used for detection
@@ -2184,6 +2525,9 @@ class VisionCaptureDemo:
         r = self.results
         r.final_state = self.state.value
         r.metrics["sim_time_s"] = self.sim_time
+        if self._mrv_log:
+            r.metrics.setdefault("mrv_approach", dict(self._mrv_log))
+            r.metrics["capture_phase_start_s"] = self._capture_t0
         r.metrics["wall_time_s"] = time.time() - self.wall_start
         r.metrics["max_arm_contact_force_n"] = self._max_contact
         rows = self.rows

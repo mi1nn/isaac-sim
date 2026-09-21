@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .frames import Frame, rotation_angle
+from .mrv_approach import MrvApproachCfg, validate_mrv_cfg
 from .probe_dock import (
     DockingVisionCfg,
     ProbeCameraCfg,
@@ -254,6 +255,9 @@ class VisionCaptureConfig:
     test: TestVisionCfg = field(default_factory=TestVisionCfg)
     logging: LoggingVisionCfg = field(default_factory=LoggingVisionCfg)
     ros: RosVisionCfg = field(default_factory=RosVisionCfg)
+    # MRV rendezvous phase in front of the capture (`mrv_approach.py`): folded arm,
+    # two translation legs, arm deployment, thruster plume VFX
+    mrv: MrvApproachCfg = field(default_factory=MrvApproachCfg)
     # Ares1 probe -> satellite thruster docking phase (`probe_dock.py`)
     docking: DockingVisionCfg = field(default_factory=DockingVisionCfg)
     # RGB-D camera on the Ares1 probe (docking phase)
@@ -316,6 +320,7 @@ def load_vision_config(path: Optional[str | Path] = None, overrides: Sequence[st
     if cfg.mep.six_dof and np.linalg.norm(w) >= cfg.prediction.max_plausible_angular_rate_rad_s:
         raise ValueError("mep.angular_velocity_rad_s exceeds prediction.max_plausible_angular_rate_rad_s "
                          "(the estimate would always be rejected)")
+    validate_mrv_cfg(cfg.mrv)
     validate_docking_cfg(cfg.docking)
     validate_probe_camera_cfg(cfg.probe_camera)
     if cfg.ros.publish_rate_hz <= 0.0 or not cfg.ros.namespace.strip("/"):

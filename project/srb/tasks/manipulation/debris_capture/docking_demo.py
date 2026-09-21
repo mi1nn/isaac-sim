@@ -210,6 +210,18 @@ class ArmKinematics:
         """Change the controlled frame (EE contact face, or the probe tip once attached)."""
         self.tool = tool_in_link
 
+    def refresh_base(self):
+        """Re-read the (normally fixed) base frame from the simulation.
+
+        Only needed by the MRV rendezvous phase, which translates the whole articulation
+        before the capture starts; nothing else moves the base, so for every existing
+        scenario this re-reads the same pose the constructor cached.
+        """
+        self.base = Frame.from_pos_quat(
+            self.robot.data.root_pos_w[0].tolist(), self.robot.data.root_quat_w[0].tolist()
+        )
+        return self.base
+
     ## State
     def link_pose(self) -> Frame:
         return Frame.from_pos_quat(

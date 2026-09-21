@@ -219,6 +219,67 @@ ros:
   require_start_cmd: false
   distro: jazzy
 
+mrv:
+  # Rendezvous phase in front of the verified capture pipeline (`mrv_approach.py`):
+  #   folded arm -> MRV translation step 1 -> step 2 -> arm deploy -> SEARCH (existing)
+  # The MRV here is the Canadarm3 base plus the spacecraft hull it sits on; both are
+  # translated rigidly (the base is a fixed-base articulation, the hull a static prim).
+  # false: the demo starts exactly as it did before -- arm at the observation pose, MRV
+  # at its nominal pose (`vision_capture.py --no_mrv_approach`).
+  enabled: true
+  # World-frame offset of the MRV START pose from its nominal pose [m]. The two legs
+  # cancel it exactly, so from the arm deployment on, the scene is the configuration the
+  # capture / transport / docking pipeline was verified in.
+  # The approach axis is world +X (docking.placement.approach_dir) and the MEP sits at
+  # x ~ +5 m, so -X starts the MRV further back and -Z below it: leg 1 is a horizontal
+  # run towards the MEP, leg 2 a climb to the working height.
+  start_offset_m: [-5.0, 0.0, -3.0]
+  # Per-axis fraction of `start_offset_m` cancelled by leg 1 (leg 2 cancels the rest).
+  # [1, 1, 0] = horizontal leg first, vertical leg second.
+  step1_axis_mask: [1.0, 1.0, 0.0]
+  # Transit reference: trapezoidal (accelerate, cruise, decelerate into the target).
+  # 5.0 m + 3.0 m at 0.4 m/s ~ 13 s + 9 s, so both steps are clearly visible without
+  # stretching the demo.
+  speed_mps: 0.4
+  accel_mps2: 0.15
+  # Arrival is judged on the distance to the leg target, not on elapsed time
+  position_tolerance_m: 0.02
+  settle_time_s: 1.0
+  # Folded (stowed) arm, `canadarm3_large_joint_1..7` [deg]. Joints 2-5 at zero already
+  # fold the two 3.66 m booms back onto each other (the elbow still swings up to 4.25 m
+  # before folding back down -- unavoidable given the boom length, and clear of the hull
+  # either way); joint 1 keeps the azimuth of the arm's own init_state (50 deg) so the
+  # deployment only unfolds the booms. Joint 6 (135 deg) tucks the wrist close ABOVE the
+  # shoulder -- a vertical stow (EE 1.32 m up, 0.72 m sideways, reach 1.50 m) instead of
+  # out to the side (-90 deg gave 0.59 m up but 2.17 m sideways, reach 2.24 m).
+  folded_joint_deg: [50.0, 0.0, 0.0, 0.0, 0.0, 135.0, 0.0]
+  # Joint-space interpolation from the folded pose to the pose the existing pipeline
+  # starts from (the observation pose, or the yawed start pose with --start_yaw_deg)
+  deploy_duration_s: 10.0
+  # Upper bound on the settling time after the ramp; the state ends as soon as every
+  # joint is within deploy_tolerance_deg of the target (1.5 s left 0.36 deg / 57 mm at
+  # the EE, more than the 30 mm SEARCH treats as "arrived")
+  deploy_settle_s: 4.0
+  deploy_tolerance_deg: 0.1
+  stage_timeout_s: 120.0
+  # The MEP keeps drifting and turning during the approach, so it must start further
+  # upstream for its nominal rendezvous pose to be reached when the CAPTURE starts:
+  # `mep.rendezvous_time_s` is extended by this many seconds. < 0: auto (the planned
+  # duration of the approach + deployment).
+  mep_rendezvous_delay_s: -1.0
+  # Thruster plume -- visual only, on separate prims, no collider and no physics force.
+  # On during the two translation legs, off everywhere else (deploy, search, capture,
+  # transport, docking). A failure to create it never stops the pipeline.
+  vfx_enabled: true
+  plume_length_m: 2.5
+  plume_radius_m: 0.45
+  plume_flicker: 0.18
+  plume_color: [0.55, 0.78, 1.0]
+  # Spread of the 4 plumes over the exhaust face, as a fraction of the thruster box
+  # half extent, and how far the nozzle sits inside the hull silhouette
+  plume_spread: 0.45
+  plume_inset: 0.85
+
 docking:
   # Phase 2: the captured MEP's Ares1 probe is docked into the satellite thruster.
   # Off by default; `vision_capture.py --dock` turns it on. Frames come from
