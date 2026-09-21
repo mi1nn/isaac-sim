@@ -1,0 +1,64 @@
+{
+  "generated_at": "2026-09-20T08:36:39.486037+00:00",
+  "nodes": {
+    "tasks_manipulation_debris_capture_capture_capturemanager": {
+      "code_fingerprint": "a5f7e3522a10b36641075b95d3a2899ab903b5f434eb34fc2f4fd8a2375bd691",
+      "label": "CaptureManager",
+      "last": "2026-09-20T07:40:14.122183+00:00",
+      "provenance": [
+        {
+          "date": "2026-09-20T07:40:14.122183+00:00",
+          "outcome": "useful",
+          "q": "현재 코드 점검 좀 해줄래? 어떻게 구동되고 문제가 될 만한 부분, 개선되면 좋을 파트"
+        },
+        {
+          "date": "2026-09-20T01:16:46.936967+00:00",
+          "outcome": "useful",
+          "q": "현재 브랜치의 코드를 실행하면 시스템 플로우가 어떻게 되는 지 알려줘."
+        },
+        {
+          "date": "2026-09-18T09:25:06.176964+00:00",
+          "outcome": "useful",
+          "q": "지금 프로젝트 진행하면서 포트폴리오나 면접에서 내가 어필할만한 원천기술이나 기반, 코어 기술같은게 있을까?"
+        }
+      ],
+      "score": 2.947646203,
+      "source_file": "tasks/manipulation/debris_capture/capture.py",
+      "status": "preferred",
+      "uses": 3
+    },
+    "utils_camera": {
+      "code_fingerprint": "7662c9c39259dfb6f20bbd9adff295657be70275fe45ca05d76cc132dd39b97b",
+      "label": "camera.py",
+      "last": "2026-09-20T07:40:14.122183+00:00",
+      "provenance": [
+        {
+          "date": "2026-09-20T07:40:14.122183+00:00",
+          "outcome": "useful",
+          "q": "현재 코드 점검 좀 해줄래? 어떻게 구동되고 문제가 될 만한 부분, 개선되면 좋을 파트"
+        }
+      ],
+      "score": 0.999095103,
+      "source_file": "utils/camera.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "utils_ros_transformbroadcaster": {
+      "code_fingerprint": "073665de95b53276b1f20371aa2079b57ebc3a29807973446b219d90616830b7",
+      "label": "TransformBroadcaster",
+      "last": "2026-09-18T09:25:06.176964+00:00",
+      "provenance": [
+        {
+          "date": "2026-09-18T09:25:06.176964+00:00",
+          "outcome": "useful",
+          "q": "지금 프로젝트 진행하면서 포트폴리오나 면접에서 내가 어필할만한 원천기술이나 기반, 코어 기술같은게 있을까?"
+        }
+      ],
+      "score": 0.955584092,
+      "source_file": "utils/ros.py",
+      "status": "tentative",
+      "uses": 1
+    }
+  },
+  "version": 1
+}

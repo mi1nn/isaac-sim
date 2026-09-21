@@ -1,0 +1,138 @@
+# Probe-into-thruster docking on GPS telemetry + a probe-tip RGB-D camera (Phase 2).
+#
+# Loaded by `srb/tasks/manipulation/debris_capture/probe_dock_config.py`.
+# Override any value from the command line of `project/scripts/probe_dock_demo.py`,
+# e.g. `--set gps.pos_noise_m=0.06`.
+#
+# The split that makes this work: the telemetry says WHICH WAY, the camera says HOW FAR.
+# The bore is 0.93 m across at the dock point and the probe is 0.16 m, so a few
+# centimetres of sideways telemetry bias is survivable. The same bias along the axis is
+# not -- the bore surface the camera ranges to is only 1.53 m past the dock point, and
+# the collider back plate is 0.10 m past it. So the axial number never comes from GPS.
+
+gps:
+  # Real ROS 2 topics (`--no_ros` swaps in an in-process link with the same contract).
+  # The client publishes both; the controller only subscribes to `thruster_topic`.
+  gps_topic: /client/gps/pose
+  thruster_topic: /client/thruster_pose
+  frame_id: world
+  rate_hz: 5.0
+  # Age of a pose by the time it is received
+  latency_s: 0.2
+  # Per-message white noise (averaging removes this)
+  pos_noise_m: 0.03
+  rot_noise_deg: 1.0
+  # Slowly wandering offset (averaging does NOT remove this -- the reason the depth
+  # camera exists). Ornstein-Uhlenbeck with this 1-sigma and correlation time.
+  bias_pos_m: 0.05
+  bias_tau_s: 60.0
+  # Fraction of messages that never arrive
+  dropout_prob: 0.0
+  seed: 0
+  history_s: 5.0
+
+# Stand-off in front of the nozzle exit where the alignment is judged.
+# Negative depth = outside the bore.
+approach_depth_m: -1.0
+# Final insertion depth. Overwritten at startup from `DockingCfg.dock_depth` (0.8 m),
+# which is the design value the whole scene placement is built around.
+dock_depth_m: 0.8
+
+# --- ALIGN: judged in the probe tip frame against the *believed* thruster pose -------
+align_radial_m: 0.02
+align_axis_deg: 0.5
+align_roll_deg: 1.0
+# Low-pass on the received pose. Long enough to beat down the 3 cm white noise, short
+# enough to still follow the client. It cannot remove the bias, and is not meant to.
+telemetry_filter_tau_s: 1.0
+# No pose newer than this means the link is gone -> safe stop
+telemetry_timeout_s: 2.0
+
+# --- Arm (overrides DockingDemo's DemoCfg for THIS demo only) -------------------------
+# The GT demo `satellite_docking_demo.py` keeps its validated Phase-1 values; these are
+# 3x for the capture and transport legs, which is where the time goes. The insertion
+# speed is left alone: it ends in a joint being created inside a 0.93 m bore.
+# Caveat measured in Phase 1: the Canadarm3 drives are strongly overdamped, and
+# `run_segment` only advances its target while the tracking error stays below
+# `lag_pos`, so past a point the arm simply cannot follow a higher number. Raise these
+# and check the state timestamps actually moved.
+arm:
+  # --- free motion (no payload) ---
+  speed_free: 0.75      # default 0.25
+  # THE gate that matters. The Canadarm3 drives trail a moving target by
+  # damping/stiffness = 0.625 s, so the sustainable speed is lag_pos / 0.625. At the
+  # default 0.10 that is 0.16 m/s no matter what `speed_free` says.
+  lag_pos: 0.30         # default 0.10  -> ~0.48 m/s
+  lag_ang: 20.0         # default 5 deg
+  speed_ang: 30.0       # default 8 deg/s
+
+  # --- straight approach to the MEP face (`precise` segments) ---
+  # This leg was 110 s of the ~160 s pre-capture time, and none of the speeds above
+  # touch it: `lag_pos_precise` capped it at 0.01/0.625 = 0.016 m/s over a 1.0 m
+  # approach. Raising the gate is what actually speeds up the capture.
+  lag_pos_precise: 0.04      # default 0.01 -> ~0.064 m/s
+  lag_ang_precise: 2.0       # default 0.5 deg
+  speed_final: 0.12          # default 0.04
+  precise_accel: 0.02        # default 0.005 m/s^2 ramp-up
+  precise_decel_gain: 0.5    # default 0.15 (v <= gain * remaining)
+  precise_creep: 0.008       # default 0.002
+  # Shorter straight-line run-in to the face: 1.0 m of it existed to prove the approach
+  # is along the face normal, and 0.6 m proves the same thing in 40% less time.
+  pre_grasp_distance: 0.6
+
+  # --- carrying the 3 t MEP ---
+  speed_carry: 0.30     # default 0.10
+  # NOT max_joint_step. Raising the joint lead 0.06 -> 0.12 was measured to stall the
+  # lift: the arm+payload mode is lightly damped, a bigger lead excites it harder, and
+  # the segment ended at ~5.9 mm of error against a 5 mm settle tolerance -- it never
+  # settled and timed out at 240 s. The lead is what the tolerances were tuned around.
+
+  # Faster motion excites the payload more, so allow a little longer to settle
+  timeout: 300.0        # default 240 s per state
+
+# --- Speeds (this demo's own servo) ---------------------------------------------------
+align_speed_mps: 0.10
+align_speed_ang_deg_s: 6.0
+insert_speed_mps: 0.04
+# Remaining depth below which the insertion creeps
+creep_range_m: 0.15
+insert_creep_mps: 0.015
+max_joint_step_rad: 0.06
+ik_lambda: 0.05
+
+# --- Depth camera ---------------------------------------------------------------------
+depth_valid_min_m: 0.05
+depth_filter_tau_s: 0.3
+# A frame disagreeing with the filtered value by more than this is dropped
+depth_outlier_m: 0.25
+# Inside the bore, the tip must not stray further than this off the believed axis
+# Optical centring from the depth ring -- this is what makes the lateral precision
+# possible. The telemetry bias is ~100 mm while docking needs 20 mm, so GPS cannot
+# centre the probe; driving the bore's depth ring symmetric can, and is unbiased.
+centring_enabled: true
+centring_gain: 0.35
+centring_max_step_m: 0.05
+centring_docked_span_m: 0.05
+# Gross-excursion guard against the BELIEVED axis, not a precision figure
+insert_max_radial_m: 0.30
+# Stop if the modelled probe-to-wall clearance drops below this (it is 0.386 m at the
+# dock point when perfectly centred, so this only fires on a real excursion)
+min_wall_clearance_m: 0.05
+
+# --- DOCK gates -------------------------------------------------------------------
+dock_depth_tol_m: 0.02
+dock_radial_m: 0.15   # vs the believed axis; the tight one is centring_docked_span_m
+dock_axis_deg: 0.5
+
+# --- Timeouts [s of simulated time] ---------------------------------------------------
+approach_timeout_s: 240.0
+# Arrival at the stand-off station (coarse: the telemetry it came from is tens of mm out)
+approach_arrive_m: 0.05
+approach_arrive_deg: 1.0
+approach_arrive_speed_mps: 0.005
+# Headless only: linger this long in a terminal state, then exit. The GUI ignores it and
+# keeps the window open until you close it.
+terminal_hold_s: 3.0
+align_timeout_s: 120.0
+insert_timeout_s: 120.0
+settle_steps: 3
