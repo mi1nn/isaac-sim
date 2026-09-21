@@ -43,7 +43,7 @@ from .vision import (
 # (0.0, 5.5, 0.0); the vision demo uses a shorter sideways carry (-0.7 m, -12.7 %) to cut the
 # transport time. Same +Y direction, so the docking axis and approach direction are unchanged.
 # NEEDS_ISAAC_VALIDATION: reachability of the shifted pre-dock / docked poses is not re-checked.
-VISION_DOCK_OFFSET_M: Tuple[float, float, float] = (0.0, 4.8, 0.0)
+VISION_DOCK_OFFSET_M: Tuple[float, float, float] = (0.0, 3.2, 0.0)
 
 
 @configclass
