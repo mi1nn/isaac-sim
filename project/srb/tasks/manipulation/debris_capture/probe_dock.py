@@ -116,6 +116,10 @@ class DockingVisionCfg:
     dock_axis_deg: float = 0.5
     dock_roll_deg: float = 1.0
     max_relative_velocity_mps: float = 0.02
+    # DOCK_READY gives up after 5 s. With this many retries it goes back to aligning instead (closed loop, the
+    # same way the Z approach does): the arm + 3 t payload swings with a ~20 s period, so a 5 s window can sit on a
+    # bad phase of a swing that is still inside the corridor (measured: 47 mm radial vs the 40 mm gate). 0 = fail at once.
+    dock_ready_retries: int = 0
     # Minimum clearance between the probe surface and the nozzle inner wall [m]
     min_wall_clearance_m: float = 0.02
 
@@ -136,6 +140,11 @@ class DockingVisionCfg:
     # the geometric distance is known) and logs it next to `backstop_gap` for comparison.
     depth_surface_offset_m: float = 0.1
     auto_calibrate: bool = True
+    # The calibration is only taken with the probe this close to the docking axis [m]. Off the axis the
+    # principal ray lands on a nearer structure (measured at 35-50 mm lateral: surface offset 1.19 m
+    # instead of 1.53 m on the axis, i.e. a constant 336 mm depth-vs-geometry mismatch that stops the
+    # approach), so a wide alignment gate must not decide where the depth is calibrated.
+    depth_calibration_lateral_m: float = 0.02
     # The Z approach requires a valid depth reading (fail-safe, never a blind advance)
     require_depth: bool = True
 
@@ -220,6 +229,10 @@ def validate_docking_cfg(cfg: DockingVisionCfg):
         raise ValueError("docking.depth_patch_px must be a positive odd number of pixels")
     if not 0.0 < cfg.depth_min_m < cfg.depth_max_m:
         raise ValueError("docking requires 0 < depth_min_m < depth_max_m")
+    if cfg.dock_ready_retries < 0:
+        raise ValueError("docking.dock_ready_retries must be >= 0")
+    if cfg.depth_calibration_lateral_m <= 0.0:
+        raise ValueError("docking.depth_calibration_lateral_m must be > 0")
 
 
 ######################

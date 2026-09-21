@@ -12,6 +12,9 @@ Telemetry out (all topics under /<namespace>/, world frame `ros.world_frame`):
     state                        std_msgs/String          state machine state (latched)
     captured                     std_msgs/Bool            FixedJoint attached (latched)
     status                       std_msgs/String          JSON: capture metrics, tags, standoff, ...
+    docked                       std_msgs/Bool            MEP <-> Client docking FixedJoint (latched, docking phase only)
+    client/pose                  geometry_msgs/PoseStamped  Client reference point (SAT_DOCK_POINT) (docking phase)
+    orbit/client_error           std_msgs/Float64         distance Client point -> reference orbit [m] (orbit scenario)
     /tf                          tf2_msgs/TFMessage       world -> <ns>/{cylinder_est, cylinder_pred, ee, cam_wrist, cylinder_gt}
 
 Commands in:
@@ -65,11 +68,11 @@ class VisionRosInterface:
         from rclpy.executors import SingleThreadedExecutor
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
         from sensor_msgs.msg import CameraInfo, Image
-        from std_msgs.msg import Bool, Empty, String
+        from std_msgs.msg import Bool, Empty, Float64, String
         from tf2_msgs.msg import TFMessage
 
         self._msgs = dict(PoseStamped=PoseStamped, TwistStamped=TwistStamped, TransformStamped=TransformStamped,
-                          Image=Image, CameraInfo=CameraInfo, String=String, Bool=Bool, TFMessage=TFMessage)
+                          Image=Image, CameraInfo=CameraInfo, String=String, Bool=Bool, Float64=Float64, TFMessage=TFMessage)
         self._owns_context = not rclpy.ok()
         if self._owns_context:
             rclpy.init()
@@ -94,6 +97,10 @@ class VisionRosInterface:
             "state": create(String, "state", latched),
             "captured": create(Bool, "captured", latched),
             "status": create(String, "status", reliable),
+            # docking phase / orbit scenario (published only when the demo has something to say)
+            "docked": create(Bool, "docked", latched),
+            "client": create(PoseStamped, "client/pose", reliable),
+            "orbit_error": create(Float64, "orbit/client_error", reliable),
         }
         if cfg.publish_ground_truth:
             self.pub["gt"] = create(PoseStamped, "gt/cylinder_pose", reliable)
@@ -109,6 +116,7 @@ class VisionRosInterface:
         self.node.create_subscription(Bool, "cmd/capture_enable", self._on_capture_enable, reliable)
         self._last_state: Optional[str] = None
         self._last_captured: Optional[bool] = None
+        self._last_docked: Optional[bool] = None
         self.camera_frame = f"{self.ns}/{camera_frame}"
         print(f"[ROS] node /{self.ns}/{cfg.node_name} up, topics under /{self.ns}/ "
               f"(start required: {cfg.require_start_cmd}, RMW {os.environ.get('RMW_IMPLEMENTATION', 'default')})", flush=True)
@@ -214,6 +222,16 @@ class VisionRosInterface:
         payload = {"sim_time_s": t, "state": state, "captured": captured}
         payload.update({k: (_finite(v) if isinstance(v, (int, float, np.floating)) and not isinstance(v, bool) else v) for k, v in status.items()})
         self.pub["status"].publish(self._msgs["String"](data=json.dumps(payload)))
+
+    def publish_docking(self, t: float, docked: bool, client: Frame, orbit_error_m: Optional[float] = None):
+        """Docking phase: `docked` (latched, on change), the Client point and, with the orbit scenario,
+        its distance to the reference orbit."""
+        if docked != self._last_docked:
+            self._last_docked = docked
+            self.pub["docked"].publish(self._msgs["Bool"](data=bool(docked)))
+        self.pub["client"].publish(self._pose(client, t))
+        if orbit_error_m is not None:
+            self.pub["orbit_error"].publish(self._msgs["Float64"](data=float(orbit_error_m)))
 
     def publish_poses(self, t: float, est: Optional[Frame], pred: Optional[Frame], ee: Frame, ee_target: Optional[Frame],
                       cam: Optional[Frame], v=None, w=None, gt: Optional[Frame] = None, gt_v=None, gt_w=None):

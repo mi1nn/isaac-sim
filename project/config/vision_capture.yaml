@@ -297,6 +297,9 @@ docking:
   dock_axis_deg: 2.0
   dock_roll_deg: 4.0
   max_relative_velocity_mps: 0.05
+  # DOCK_READY: re-align (up to this many times) instead of failing after 5 s when a condition is not met yet
+  # (the arm + 3 t payload swing has a ~20 s period; a 5 s window can sit on a bad phase of it)
+  dock_ready_retries: 3
   min_wall_clearance_m: 0.02
 
   # `cam_probe` depth: distance_to_image_plane along the docking axis, compared with
@@ -312,6 +315,10 @@ docking:
   # rendered, so the ray lands on the thruster mesh behind it)
   depth_surface_offset_m: 0.1
   auto_calibrate: true
+  # Take the calibration only this close to the docking axis [m]: at 35-50 mm lateral (inside the 50 mm alignment
+  # gate) the principal ray lands on a nearer structure (surface offset 1.19 m instead of 1.53 m) and the depth
+  # then disagrees with the geometry by a constant 336 mm, which stops the approach
+  depth_calibration_lateral_m: 0.02
   require_depth: true
 
   # 240 s per state, as in the existing GT docking demo: the 5.5 m transport of the 3 t
@@ -338,3 +345,98 @@ probe_camera:
   clipping_range_m: [0.01, 30.0]
   offset_from_tip_m: 0.02
   rgb_every_sec: 1.0
+
+orbit_reference:
+  # Client-satellite reference orbit ("normal orbit") + return after docking
+  # (docs/mrv_orbit_return.md). Off by default so the existing scenarios are untouched:
+  #   --orbit-return  capture -> docking -> Client returned onto the orbit (add --dock_only to skip the capture)
+  #   --orbit-only    scene check only (red orbit, free flight, initial offset), no capture / docking
+  # The scene has no gravity: the orbit is a reference trajectory in the world frame, not a Kepler solution.
+  # The Earth is the sky dome (low_earth_orbit.exr): a cap around the world -Z axis (nadir) whose limb is 18.3 deg
+  # below the horizon. The orbit is a horizontal ring concentric with it (normal +Z) and only the visible arc is drawn.
+  # Turning it on replaces mep.linear_velocity_mps / mep.drift_direction and docking.satellite_* with `drift:`
+  # and forbids rotation of both bodies (mep.motion_mode must be translation_only).
+  enabled: false
+  observe_only: false
+  observe_only_duration_s: 20.0
+
+  shape: circle              # circle | ellipse
+  # null: derived so that the Client's validated start point lies exactly client_initial_offset_m off
+  # the orbit. [x, y, z]: fixed world centre, the Client is then moved to (nominal orbit point + offset)
+  # -- re-check the arm reach of the docking poses.
+  center_w: null
+  normal_w: [0.0, 0.0, 1.0]  # = -nadir: the ring axis is the Earth axis
+  radius_m: 50.0             # circle. Drawn at reduced scale (the real orbit radius is ~6700 km, see docs)
+  semi_major_m: 50.0         # ellipse (semi_major along the in-plane axis e1 = world +X projected on the plane)
+  semi_minor_m: 40.0
+  # Only the arc in front of the viewer is drawn / used: this many degrees about the axis, centred on the
+  # nominal angle (360 = the whole ring)
+  arc_span_deg: 80.0
+  # GUI start view: the eye is on the ring axis, above the ring plane so that the ring appears this many
+  # degrees below the horizon (the Earth limb is at 18.3 deg): the arc then runs parallel to the limb
+  view_elevation_deg: 12.0
+  segments: 128              # >= 128
+  line_width_m: 0.25         # tube diameter of the red line [m] (~4 px at 50 m; 0.06 was 1 px)
+  color_rgb: [1.0, 0.0, 0.0]
+  prim_path: /World/reference_orbit
+
+  # Angle of the orbit point the Client nominally sat on [deg from e1 = world +X]; the drawn arc is centred on it.
+  # With 0 the ring centre lies on the arm side (x smaller than the Client) and the tangent is world Y.
+  # null = automatic (perpendicular to the docking axis / nearest to the Client)
+  nominal_angle_deg: 0.0
+  # Rigid Client point that has to reach the orbit. sat_dock_point (default) | body_origin.
+  # SAT_DOCK_POINT: the frame every docking error is expressed in and the FixedJoint anchor, so once
+  # docked it coincides with the probe tip (the IK tool) and the arm goal is a pure translation.
+  # The satellite body origin lies ~8.7 m from it, which would tie the arm's reach to a point unrelated to docking.
+  client_reference: sat_dock_point
+  client_initial_offset_m: 0.5
+  # radial_outward | radial_inward | [x, y, z]: straight up = an altitude error above the ring plane. It also keeps
+  # the docking axis (horizontal) client_initial_offset_m away from the orbit, so the line never enters the depth ray.
+  client_offset_direction: [0.0, 0.0, 1.0]
+  initial_offset_tolerance_m: 0.005
+
+  target_mode: nearest_feasible_point
+  arrival_tolerance_m: 0.05
+  hold_duration_s: 10.0
+  # Arm workspace pre-filter for the EE contact point (it holds the MEP; the Client point is metres further
+  # out, rigid with it), measured from the arm base [m]
+  # (Canadarm3 reach is ~8.5 m, see task.py). NEEDS_ISAAC_VALIDATION: not derived from the joint limits
+  arm_reach_min_m: 1.0
+  arm_reach_max_m: 8.0
+  max_target_candidates: 64
+  # Carry speed of the joined MEP + Client [m/s]; acceleration / deceleration follow docking.accel_mps2 /
+  # docking.decel_gain_hz (a 3 t MEP + the Client on the arm rings at ~20 s if the profile is stepped)
+  transfer_speed_mps: 0.02
+  # The joined MEP + very heavy Client swing as a pendulum-like mode of ~45 s period (measured): slow, smooth profile
+  transfer_accel_mps2: 0.002
+  transfer_decel_gain_hz: 0.03
+  # The reference speed fades to 0 as the measured tool lag reaches this [m]: the joined MEP + Client is far
+  # heavier than the arm was tuned for and lags a fast reference (then the clamped joint step stops pointing at the goal)
+  transfer_lag_limit_m: 0.05
+  transfer_timeout_s: 400.0
+  arrival_hold_s: 0.5
+  arrival_timeout_s: 60.0
+  max_retargets: 3
+  joint_limit_margin_rad: 0.02
+  # Same criteria as the existing DOCK6 hold
+  max_relative_drift_mm: 5.0
+  max_relative_drift_deg: 0.5
+  max_client_angular_velocity_rad_s: 0.005
+  # The orbit must keep this far from the docking axis and from the wrist-camera-to-tags corridor
+  sensor_keepout_m: 0.4
+  # Nothing is teleported: the Client point may not move more than this in one control step [m]
+  max_step_jump_m: 0.005
+
+drift:
+  # Used only while orbit_reference.enabled. Same world velocity for both by default: along the orbit (the
+  # tangent at the nominal point is world Y), horizontal and perpendicular to the arm's approach axis (+X).
+  mep_velocity_mps: 0.01
+  mep_direction_w: [0.0, -1.0, 0.0]
+  client_velocity_mps: 0.01
+  client_direction_w: [0.0, -1.0, 0.0]
+  # Rotation is forbidden in this scenario: must be [0, 0, 0]
+  angular_velocity_rad_s: [0.0, 0.0, 0.0]
+  # A free (not yet captured / docked) body deviating more than this from its commanded velocity
+  # (or turning faster) fails the run. Damping is 0 for both bodies (checked at start).
+  velocity_tolerance_mps: 0.002
+  angular_tolerance_rad_s: 0.002

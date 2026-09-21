@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .frames import Frame, rotation_angle
+from .orbit_return import DriftCfg, OrbitReferenceCfg, validate_drift_cfg, validate_orbit_cfg
 from .probe_dock import (
     DockingVisionCfg,
     ProbeCameraCfg,
@@ -258,6 +259,10 @@ class VisionCaptureConfig:
     docking: DockingVisionCfg = field(default_factory=DockingVisionCfg)
     # RGB-D camera on the Ares1 probe (docking phase)
     probe_camera: ProbeCameraCfg = field(default_factory=ProbeCameraCfg)
+    # Client reference orbit + return after docking (`orbit_return.py`); `drift` replaces the
+    # `mep.*` / `docking.satellite_*` velocities while `orbit_reference.enabled`
+    orbit_reference: OrbitReferenceCfg = field(default_factory=OrbitReferenceCfg)
+    drift: DriftCfg = field(default_factory=DriftCfg)
 
     def to_dict(self) -> dict:
         def conv(obj):
@@ -299,6 +304,17 @@ def load_vision_config(path: Optional[str | Path] = None, overrides: Sequence[st
         if not name:
             raise ValueError(f"Override must look like 'section.key=value', got '{item}'")
         _apply(cfg, {section: {name: yaml.safe_load(raw)}}, "")
+    if cfg.orbit_reference.enabled:
+        # Orbit-return scenario: translation only, both bodies drift with `drift:` and never rotate
+        validate_orbit_cfg(cfg.orbit_reference)
+        validate_drift_cfg(cfg.drift)
+        if cfg.mep.motion_mode != "translation_only":
+            raise ValueError("orbit_reference.enabled requires mep.motion_mode: translation_only (six_dof is not part of this scenario)")
+        cfg.mep.linear_velocity_mps = cfg.drift.mep_velocity_mps
+        cfg.mep.drift_direction = list(cfg.drift.mep_direction_w)
+        cfg.mep.angular_velocity_rad_s = [0.0, 0.0, 0.0]
+        cfg.docking.satellite_velocity_mps = cfg.drift.client_velocity_mps
+        cfg.docking.satellite_drift_direction = list(cfg.drift.client_direction_w)
     d = np.asarray(cfg.mep.drift_direction, dtype=float)
     if np.linalg.norm(d) < 1e-9:
         raise ValueError("mep.drift_direction must be non-zero")

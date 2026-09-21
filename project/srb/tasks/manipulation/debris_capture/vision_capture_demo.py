@@ -25,6 +25,7 @@ States (Section 26 of the task spec):
 """
 
 import csv
+import dataclasses
 import json
 import math
 import time
@@ -37,7 +38,7 @@ import numpy as np
 import torch
 
 from .docking_demo import ArmKinematics, interp_frame
-from . import probe_dock
+from . import orbit_return, probe_dock
 from .frames import Frame, axis_angle, rotation_angle
 from .vision import (
     yaw_about_base,
@@ -103,14 +104,24 @@ class State(Enum):
     DOCKED = "DOCKED"
     DOCK_HOLDING = "DOCK_HOLDING"
     DOCK_FAILED = "DOCK_FAILED"
+    ## Phase 3 -- the docked MEP + Client are carried onto the Client reference orbit
+    ## (`orbit_return.py`, `--orbit-return`): DOCKED -> ORBIT_TARGET_ACQUIRE -> ORBIT_TRANSFER
+    ## -> ORBIT_ARRIVAL_CHECK -> ORBIT_HOLDING -> SUCCESS
+    ORBIT_TARGET_ACQUIRE = "ORBIT_TARGET_ACQUIRE"
+    ORBIT_TRANSFER = "ORBIT_TRANSFER"
+    ORBIT_ARRIVAL_CHECK = "ORBIT_ARRIVAL_CHECK"
+    ORBIT_HOLDING = "ORBIT_HOLDING"
+    ORBIT_FAILED = "ORBIT_FAILED"
 
 
 FAILURES = {State.TAG_LOST, State.POSE_INVALID, State.PREDICTION_INVALID, State.APPROACH_TIMEOUT, State.CAPTURE_FAILED, State.PHYSICS_ERROR,
-            State.ABORTED, State.DOCK_FAILED}
+            State.ABORTED, State.DOCK_FAILED, State.ORBIT_FAILED}
+# States of the orbit-return phase (the probe tip stays the controlled frame; MEP + Client are joined)
+ORBIT_STATES = {State.ORBIT_TARGET_ACQUIRE, State.ORBIT_TRANSFER, State.ORBIT_ARRIVAL_CHECK, State.ORBIT_HOLDING}
 # States of the docking phase (the probe tip is the controlled frame in all of them)
 DOCKING_STATES = {State.DOCK_TARGET_ACQUIRE, State.PRE_DOCK_APPROACH, State.XY_ALIGN, State.ORIENTATION_ALIGN,
                   State.ALIGNMENT_CHECK, State.Z_APPROACH, State.FINAL_INSERTION, State.DOCK_READY,
-                  State.DOCKED, State.DOCK_HOLDING}
+                  State.DOCKED, State.DOCK_HOLDING} | ORBIT_STATES
 # ... of which these actively command a motion towards the docking axis
 DOCKING_MOTION = {State.PRE_DOCK_APPROACH, State.XY_ALIGN, State.ORIENTATION_ALIGN, State.Z_APPROACH, State.FINAL_INSERTION}
 TERMINAL = FAILURES | {State.SUCCESS}
@@ -157,6 +168,17 @@ CSV_COLUMNS = [
     "est_ee_orientation_error_deg", "est_relative_angular_velocity_rad_s",
     "gt_ee_orientation_error_deg", "gt_relative_angular_velocity_rad_s",
     "pnp_valid", "tracking_valid",
+]
+
+
+ORBIT_CSV_COLUMNS = [
+    "run_id", "timestamp", "state",
+    "client_ref_x", "client_ref_y", "client_ref_z",
+    "orbit_error_m", "orbit_out_of_plane_m", "orbit_nearest_x", "orbit_nearest_y", "orbit_nearest_z",
+    "target_x", "target_y", "target_z",
+    "client_vx", "client_vy", "client_vz", "client_wx", "client_wy", "client_wz",
+    "mep_vx", "mep_vy", "mep_vz", "mep_wx", "mep_wy", "mep_wz",
+    "mep_client_drift_mm", "mep_client_drift_deg", "docking_joint_valid", "capture_joint_valid", "arm_joint_margin_rad",
 ]
 
 
@@ -422,6 +444,17 @@ class VisionCaptureDemo:
             self._probe_k = self._probe_cam.data.intrinsic_matrices[0].cpu().numpy().astype(float)
             # Negative: the camera sits in *front* of the tip (see `probe_dock.depth_to_dock_distance`)
             self._cam_to_tip = -float(self.cfg.probe_camera.offset_from_tip_m)
+        ## Client reference orbit (`orbit_reference.enabled`): the scene part is built by the task
+        self.orbit = getattr(t, "orbit", None)
+        self.orbit_cfg = self.cfg.orbit_reference
+        self._observe_only = bool(self.orbit is not None and self.orbit_cfg.observe_only)
+        self._orbit: Dict[str, object] = {}
+        self._orbit_goal: Optional[Frame] = None
+        self._orbit_tangent: Optional[np.ndarray] = None
+        self._orbit_view_saved = False
+        self._free_flight: Dict[str, dict] = {}
+        self._orbit_rows: List[dict] = []
+        self._orbit_csv = self._orbit_csv_file = None
         # six_dof: GT pose at t = 0 for the runtime angular-velocity frame check
         self._w_frame_ref: Optional[Tuple[float, Frame]] = None
         self._w_frame_result: Optional[dict] = None
@@ -443,6 +476,11 @@ class VisionCaptureDemo:
                 self._dock_csv_file = open(self.dock_csv_path, "w", newline="")
                 self._dock_csv = csv.DictWriter(self._dock_csv_file, fieldnames=list(probe_dock.CSV_COLUMNS))
                 self._dock_csv.writeheader()
+        if self.orbit is not None and self.cfg.logging.csv_enabled:
+            self.orbit_csv_path = out_dir / f"{self.label}_orbit.csv"
+            self._orbit_csv_file = open(self.orbit_csv_path, "w", newline="")
+            self._orbit_csv = csv.DictWriter(self._orbit_csv_file, fieldnames=ORBIT_CSV_COLUMNS)
+            self._orbit_csv.writeheader()
         self.csv_path = csv_path
         self._csv_file = self._csv = None
         if self.cfg.logging.csv_enabled:
@@ -629,6 +667,8 @@ class VisionCaptureDemo:
         if state in FAILURES:
             self.results.failure = f"{state.value}: {reason}"
             print(f"[FAIL] {state.value}: {reason}", flush=True)
+            if self.orbit is not None:
+                self.print_orbit_failure_context()
             self.q_hold = None  # safe stop: hold the joints where they are
         self.state = state
         self.state_time = 0.0
@@ -726,7 +766,7 @@ class VisionCaptureDemo:
             self._max_contact = max(self._max_contact, f)
             if f > 200.0:
                 return f"unexpected contact on the arm: {f:.0f} N"
-        return None
+        return self.check_free_flight()
 
     ###############
     ### Stepping ###
@@ -824,6 +864,8 @@ class VisionCaptureDemo:
             self.task._robot.set_joint_position_target(q, joint_ids=self.arm.joint_ids)
             self.q_hold = q.clone()
         self.ref = self.ee_pose()
+        if self.orbit is not None:
+            self.report_orbit_setup()
         ## Docking phase reported next to the capture setup
         if c.docking.enabled:
             geo = self.geo
@@ -913,7 +955,14 @@ class VisionCaptureDemo:
         v_est = self.predictor.velocity()
         if s == State.INIT:
             self.hold()
-            if self.state_time >= 0.5:
+            if self._observe_only:
+                # --orbit-only: the arm holds the observation pose, both bodies drift, nothing is captured
+                if not self._orbit_view_saved and self.state_time >= 3.0:
+                    self._orbit_view_saved = True
+                    self.save_orbit_view_image()
+                if self.state_time >= self.orbit_cfg.observe_only_duration_s:
+                    self.goto(State.SUCCESS, f"orbit-only scene check over ({self.orbit_cfg.observe_only_duration_s:.0f} s)")
+            elif self.state_time >= 0.5:
                 self.goto(State.SEARCH)
         elif s == State.SEARCH:
             if a.start_at_observe_pose and a.start_yaw_offset_deg == 0.0:
@@ -980,7 +1029,7 @@ class VisionCaptureDemo:
             if self._dock_started is None:
                 self._dock_started = self.sim_time
             elif (self.sim_time - self._dock_started > c.docking.phase_timeout_s
-                  and s not in (State.DOCKED, State.DOCK_HOLDING)):
+                  and s not in (State.DOCKED, State.DOCK_HOLDING) and s not in ORBIT_STATES):
                 return self.goto(State.DOCK_FAILED,
                                  f"the docking phase did not finish within {c.docking.phase_timeout_s:.0f} s "
                                  f"(state {s.value}, remaining {m['geometry_distance']:.3f} m, lateral {m['lateral']*1000:.1f} mm)")
@@ -1004,16 +1053,30 @@ class VisionCaptureDemo:
                 self.step_dock_ready(m)
             elif s == State.DOCKED:
                 self.step_docked(m)
+            elif s == State.ORBIT_TARGET_ACQUIRE:
+                self.step_orbit_target_acquire(m)
+            elif s == State.ORBIT_TRANSFER:
+                self.step_orbit_transfer(m)
+            elif s == State.ORBIT_ARRIVAL_CHECK:
+                self.step_orbit_arrival_check(m)
+            elif s == State.ORBIT_HOLDING:
+                self.step_orbit_holding(m)
             else:
                 self.step_dock_holding(m)
             if self.sim_time >= self._next_dock_log_t:
                 self._next_dock_log_t = self.sim_time + 1.0 / self.cfg.logging.rate_hz - 1e-9
                 self.log_dock_row(m)
                 if self.cfg.logging.debug_draw:
-                    self.update_dock_visuals(m)
+                    if self.state in ORBIT_STATES:
+                        self.update_orbit_visuals()
+                    else:
+                        self.update_dock_visuals(m)
             if self.sim_time >= self._next_status_t:
                 self._next_status_t = self.sim_time + 2.0
-                self.dock_status(m)
+                if self.state in ORBIT_STATES:
+                    self.orbit_status()
+                else:
+                    self.dock_status(m)
             if self.sim_time >= self._next_probe_rgb_t and self.cfg.probe_camera.rgb_every_sec > 0.0:
                 self._next_probe_rgb_t = self.sim_time + self.cfg.probe_camera.rgb_every_sec
                 self.save_probe_rgb()
@@ -1401,12 +1464,16 @@ class VisionCaptureDemo:
         probe, dock = self.probe_world(), self.dock_world()
         if not (np.isfinite(probe.pos).all() and np.isfinite(dock.pos).all()):
             return False, "probe tip or docking target pose is not finite"
-        prev = self._dock.get("prev_dock_pos")
+        prev, prev_t = self._dock.get("prev_dock_pos"), self._dock.get("prev_dock_t", self.sim_time)
         if prev is not None:
-            jump = float(np.linalg.norm(dock.pos - prev))
+            # The check is not made every step (the transport takes a minute), so the drift of a
+            # moving satellite over the elapsed time is expected motion, not a jump
+            expected = self.sat_velocity_at(dock.pos) * (self.sim_time - prev_t)
+            jump = float(np.linalg.norm(dock.pos - prev - expected))
             if jump > 0.25:  # the target cannot move that far in one control step
                 return False, f"docking target jumped {jump*1000:.0f} mm in one step"
         self._dock["prev_dock_pos"] = dock.pos.copy()
+        self._dock["prev_dock_t"] = self.sim_time
         return True, "ok"
 
     def begin_docking(self):
@@ -1434,7 +1501,8 @@ class VisionCaptureDemo:
         nozzle *exit*, i.e. `dock_depth + pre_dock_distance` before SAT_DOCK_POINT."""
         return -(float(self.task.cfg.docking.dock_depth) + float(self.cfg.docking.pre_dock_distance_m))
 
-    def track_probe(self, goal: Frame, speed: float, max_step: Optional[float] = None):
+    def track_probe(self, goal: Frame, speed: float, max_step: Optional[float] = None, follow_satellite: bool = True,
+                    hold_tol_m: Optional[float] = None, lag_limit_m: Optional[float] = None, accel_mps2: Optional[float] = None):
         """Rate-limited probe-tip tracking with the satellite's motion fed forward.
 
         Same structure as the capture-phase `track()`, but the controlled frame is the
@@ -1445,18 +1513,33 @@ class VisionCaptureDemo:
         if self._dock_ref is None:
             self._dock_ref = self.arm.tool_pose()
         prev = self._dock_ref
-        pos = prev.pos + self.sat_velocity_at(self.dock_world().pos) * self.dt
+        # Once docked the satellite rides on the arm: its velocity is the arm's own, not a target motion
+        pos = prev.pos + (self.sat_velocity_at(self.dock_world().pos) * self.dt if follow_satellite else 0.0)
         rot = prev.rot
         # The reference advances continuously towards the goal and then stops there.
         # It deliberately does NOT gate on the measured tracking error: an on/off gate
         # advances the reference on the half-swing that closes the error and freezes it
         # on the other, which rectifies the arm + 3 t payload mode (period ~20 s) and
         # pumps it -- measured as a steady +-150 mm lateral swing that never decayed.
-        self._dock_speed = probe_dock.ramped(d, self._dock_speed, speed, self.dt)
+        ramp_cfg = d if accel_mps2 is None else dataclasses.replace(d, accel_mps2=accel_mps2)
+        self._dock_speed = probe_dock.ramped(ramp_cfg, self._dock_speed, speed, self.dt)
+        step_speed = self._dock_speed
+        if lag_limit_m is not None:
+            # A heavy payload (MEP + Client) follows far slower than the reference: once the reference is ahead by
+            # more than a joint step can pull, the clamped joint step no longer points at the goal (measured: the
+            # Client stuck ~0.25 m short of the orbit). The reference speed therefore fades out linearly with the
+            # measured lag (continuous, not an on/off gate, so it does not rectify the swing mode).
+            # Only the lag along the direction of travel counts: the joined bodies also keep drifting sideways
+            # (along the orbit) and that must not stop the reference.
+            to_goal = goal.pos - prev.pos
+            dist = float(np.linalg.norm(to_goal))
+            lag = max(0.0, float((prev.pos - self.arm.tool_pose().pos) @ (to_goal / dist))) if dist > 1e-9 else 0.0
+            step_speed *= max(0.0, 1.0 - lag / lag_limit_m)
+            self._dock["tool_lag_m"] = lag
         delta = goal.pos - pos
         n = float(np.linalg.norm(delta))
         if n > 1e-9:
-            pos = pos + delta / n * min(n, self._dock_speed * self.dt)
+            pos = pos + delta / n * min(n, step_speed * self.dt)
         ang = rotation_angle(rot, goal.rot)
         if ang > 1e-9:
             f = min(1.0, math.radians(d.align_speed_deg_s) * self.dt / ang)
@@ -1470,7 +1553,15 @@ class VisionCaptureDemo:
         # swing undamped. Latching is the same mechanism the capture phase uses (`hold`).
         # (Integrating the target instead was tried and destabilised the arm: with a
         # joint stiffness of 40000 N m/rad even a 0.2 rad accumulated offset is huge.)
-        moved = n > 1e-9 or ang > 1e-9
+        # A reference that still advances with a drifting satellite is moving even when it has caught up
+        # with the goal: `hold()` (latched joints, zero velocity target) would stop the arm while the
+        # target keeps drifting away (measured: a steady ~40 mm / 4 s lag behind a 10 mm/s satellite)
+        moved = n > 1e-9 or ang > 1e-9 or float(np.linalg.norm(pos - prev.pos)) > 1e-9
+        if not moved and hold_tol_m is not None:
+            # The reference has stopped, but a heavy payload (MEP + Client) can still lag far behind it. Latching
+            # the joints now would freeze that lagging pose (measured: the Client stuck ~0.3 m short of the orbit,
+            # swinging about it), so the arm keeps being pulled to the reference until it is really there.
+            moved = float(np.linalg.norm(self.arm.tool_pose().pos - pos)) > hold_tol_m
         if not moved:
             return self.hold()
         self.q_hold = None
@@ -1581,8 +1672,8 @@ class VisionCaptureDemo:
         d = self.cfg.docking
         self.align_track(m)
         ok, bad = probe_dock.alignment_ok(d, m)
-        if ok and self._depth_offset is None and d.auto_calibrate and d.depth_enabled:
-            self._calibrate_depth(m)  # only on the axis: elsewhere the ray misses the nozzle
+        if ok and self._depth_offset is None and d.auto_calibrate and d.depth_enabled and m["lateral"] <= d.depth_calibration_lateral_m:
+            self._calibrate_depth(m)  # only on the axis: elsewhere the ray misses the nozzle or hits a nearer structure
         if ok and not self.tip_settled():
             ok, bad = False, [f"probe tip not at rest (> {d.settle_window_m*1000:.0f} mm over {d.settle_window_s:.0f} s)"]
             self._dock_align_since = None
@@ -1622,6 +1713,16 @@ class VisionCaptureDemo:
             return self.goto(State.DOCK_FAILED, f"docking target invalid: {why}")
         self._dock_axial_hold = None
         remaining = m["geometry_distance"]
+        # The alignment gate can let the probe through while it is still swinging off the axis, where the
+        # calibration is refused (`depth_calibration_lateral_m`); without it the depth stays invalid and the
+        # approach would hold forever. So it is also taken here, as soon as the probe is on the axis, outside the nozzle.
+        if (self._depth_offset is None and d.auto_calibrate and d.depth_enabled and m["lateral"] <= d.depth_calibration_lateral_m
+                and remaining >= d.slow_zone_m):
+            self._calibrate_depth(m)
+            if self._depth_offset is not None:
+                m["depth_distance"] = probe_dock.depth_to_dock_distance(m["depth_raw"], self._cam_to_tip, self._depth_offset)
+                ok_depth, self._depth_reason = probe_dock.depth_valid(d, m["depth_distance"], m["geometry_distance"])
+                m["depth_ok"] = float(ok_depth)
         # Fail-safe: hold position (do not advance) while the depth is not trusted
         depth_blocked = d.require_depth and not m["depth_ok"]
         if depth_blocked:
@@ -1663,6 +1764,8 @@ class VisionCaptureDemo:
             print(f"[DOCK] DOCK_READY  t={self.sim_time:.2f} s | {detail}", flush=True)
             self.results.check("[DOCK4] Docking conditions", True, detail)
             sat_before = self.sat_frame()
+            if self.orbit is not None:
+                self._orbit["motion_before_dock"] = self.motion_snapshot()
             self.task.docking.dock()
             self._dock["docked"] = self.task.docking.is_docked
             self._dock["at_dock"] = {k: v for k, v in m.items() if isinstance(v, float)}
@@ -1674,12 +1777,19 @@ class VisionCaptureDemo:
             self.goto(State.DOCKED if self.task.docking.is_docked else State.DOCK_FAILED,
                       "" if self.task.docking.is_docked else "the docking joint was not created")
         elif self.state_time > 5.0:
+            n = int(self._dock.get("ready_retries", 0))
+            if n < d.dock_ready_retries:
+                self._dock["ready_retries"] = n + 1
+                self._dock_align_since = None
+                print(f"[DOCK] conditions not met after 5 s ({'; '.join(bad)}): re-aligning ({n + 1}/{d.dock_ready_retries})", flush=True)
+                return self.goto(State.XY_ALIGN, "; ".join(bad))
             self.results.check("[DOCK4] Docking conditions", False, "; ".join(bad))
             self.goto(State.DOCK_FAILED, "docking conditions not met: " + "; ".join(bad))
 
     def step_docked(self, m):
         self.dock_hold()
-        self.goto(State.DOCK_HOLDING)
+        # --orbit-return: straight on to the orbit phase (its own hold replaces DOCK_HOLDING)
+        self.goto(State.ORBIT_TARGET_ACQUIRE if self.orbit_return_active else State.DOCK_HOLDING)
 
     def step_dock_holding(self, m):
         """Hold the docked state and watch for jumps / penetration / joint loss."""
@@ -1700,6 +1810,436 @@ class VisionCaptureDemo:
             self.results.check("[DOCK7] No penetration while docked", h["hold_min_clearance_mm"] > 0.0,
                                f"min probe-to-wall clearance {h['hold_min_clearance_mm']:.0f} mm")
             self.goto(State.SUCCESS)
+
+    ###########################################
+    ### Phase 3: Client reference orbit return ###
+    ###########################################
+
+    @property
+    def orbit_return_active(self) -> bool:
+        """The return phase runs after the docking (`--orbit-return`); `--orbit-only` only checks the scene."""
+        return self.orbit is not None and not self._observe_only and self.cfg.docking.enabled
+
+    def client_ref_world(self) -> Frame:
+        """The rigid Client point that has to reach the orbit (SAT_DOCK_POINT by default)."""
+        return self.sat_frame() @ self.orbit.client_ref_in_sat
+
+    def orbit_error(self) -> Tuple[float, np.ndarray, float]:
+        """(distance [m], nearest orbit point, its theta) of the Client point."""
+        q, theta, d = self.orbit.orbit.closest(self.client_ref_world().pos)
+        return d, q, theta
+
+    def orbit_joint_valid(self) -> bool:
+        """Both FixedJoints hold: EE <-> MEP (capture) and MEP <-> Client (docking)."""
+        return bool(self.task.docking.is_docked) and bool(self.capture.is_attached(0))
+
+    def orbit_rel_drift(self) -> Tuple[float, float]:
+        """MEP-Client relative pose drift since the docking joint was made: (mm, deg)."""
+        rel_now = self.probe_world().inv() @ self.sat_frame()
+        pe, ae = pose_errors(rel_now, self._dock["rel_at_dock"])
+        return pe * 1000.0, ae
+
+    def joint_limit_margin(self) -> float:
+        """Smallest distance of an arm joint to its (soft) limits [rad]."""
+        r = self.task._robot
+        ids = self.arm.joint_ids
+        lim = r.data.soft_joint_pos_limits[0, ids].cpu().numpy()
+        return orbit_return.joint_margin(r.data.joint_pos[0, ids].cpu().numpy(), lim[:, 0], lim[:, 1])
+
+    def client_commanded_velocity(self) -> np.ndarray:
+        d = self.cfg.docking
+        return np.asarray(d.satellite_drift_direction, dtype=float) * float(d.satellite_velocity_mps)
+
+    def motion_snapshot(self) -> dict:
+        """Linear / angular velocity (world) of both bodies, for the before / after comparisons."""
+        sat, mep = self.task._satellite.data, self.mep.data
+        return {"t": self.sim_time,
+                "mep_v": mep.root_com_lin_vel_w[0].cpu().numpy().tolist(), "mep_w": mep.root_com_ang_vel_w[0].cpu().numpy().tolist(),
+                "client_v": sat.root_com_lin_vel_w[0].cpu().numpy().tolist(), "client_w": sat.root_com_ang_vel_w[0].cpu().numpy().tolist()}
+
+    def read_damping(self, path: str) -> Optional[Tuple[float, float]]:
+        """(linear, angular) damping authored on the rigid body under `path`, or None."""
+        from pxr import Usd
+
+        root = self.stage.GetPrimAtPath(path)
+        if not root.IsValid():
+            return None
+        for p in Usd.PrimRange(root):
+            lin, ang = p.GetAttribute("physxRigidBody:linearDamping"), p.GetAttribute("physxRigidBody:angularDamping")
+            if lin and lin.IsValid() and lin.HasValue():
+                return float(lin.Get()), float(ang.Get()) if ang and ang.IsValid() and ang.HasValue() else math.nan
+        return None
+
+    def verify_orbit_prim(self) -> Tuple[bool, str]:
+        """The red orbit prim exists, is visible, red, smooth and has no physics at all."""
+        from pxr import Usd, UsdGeom
+
+        t, oc = self.orbit, self.orbit_cfg
+        root = self.stage.GetPrimAtPath(t.prim_path)
+        if not root.IsValid():
+            return False, f"{t.prim_path} does not exist"
+        geoms, physics = [], []
+        for p in Usd.PrimRange(root):
+            if p.IsA(UsdGeom.Mesh) or p.IsA(UsdGeom.BasisCurves):
+                geoms.append(p)
+            applied = [str(a) for a in p.GetAppliedSchemas() if str(a).startswith(("Physics", "Physx", "PhysX"))]
+            if applied:
+                physics.append(f"{p.GetPath()}: {applied}")
+        if not geoms:
+            return False, f"{t.prim_path} has no geometry"
+        if physics:
+            return False, f"physics schemas on the orbit prim (it must be visual only): {physics}"
+        colour = UsdGeom.Gprim(geoms[0]).GetDisplayColorAttr().Get()
+        rgb = np.asarray(colour[0], dtype=float) if colour else np.full(3, math.nan)
+        visible = UsdGeom.Imageable(root).ComputeVisibility() != UsdGeom.Tokens.invisible
+        n_pts = len(UsdGeom.Mesh(geoms[0]).GetPointsAttr().Get()) if geoms[0].IsA(UsdGeom.Mesh) else 0
+        ok = bool(np.allclose(rgb, oc.color_rgb, atol=1e-3)) and visible and n_pts >= oc.segments
+        return ok, (f"{t.prim_path}: {len(geoms)} {geoms[0].GetTypeName()} prim(s), {n_pts} vertices for {oc.segments} segments, "
+                    f"colour {np.round(rgb, 3).tolist()}, visible {visible}, no rigid body / collider / contact schema")
+
+    def report_orbit_setup(self):
+        """t = 0: log the orbit, the Client's start and verify the scene against the request."""
+        c, oc, t, r = self.cfg, self.orbit_cfg, self.orbit, self.results
+        orb = t.orbit
+        ref0 = self.client_ref_world().pos
+        prim_ok, prim_detail = self.verify_orbit_prim()
+        off_ok, dist, off_detail = orbit_return.initial_offset_check(oc, orb, ref0)
+        q_near, th_near, _ = orb.closest(ref0)
+        direction = orbit_return.offset_direction(oc, orb, t.theta_nominal)
+        mep_d, sat_d = self.read_damping(self.geo.mep_path), self.read_damping(self.geo.sat_prim_path)
+        snap = self.motion_snapshot()
+        mep_dv, mep_dw = orbit_return.free_flight_deviation(snap["mep_v"], c.mep.linear_velocity_w(), snap["mep_w"])
+        sat_dv, sat_dw = orbit_return.free_flight_deviation(snap["client_v"], self.client_commanded_velocity(), snap["client_w"])
+        print(f"[ORBIT] ---- reference orbit ({'circle' if orb.is_circle else 'ellipse'}, segments {oc.segments}, colour {oc.color_rgb}) ----", flush=True)
+        print(f"[ORBIT] centre {np.round(orb.center, 4).tolist()} m ({'derived from the Client start' if t.center_derived else 'configured'}), "
+              f"normal {np.round(orb.normal, 4).tolist()}, e1 {np.round(orb.e1, 4).tolist()}, "
+              f"radius / semi-axes {orb.a:.3f} / {orb.b:.3f} m, line width {oc.line_width_m*1000:.0f} mm, prim {t.prim_path}", flush=True)
+        print(f"[ORBIT] nominal orbit point (theta {math.degrees(t.theta_nominal):.2f} deg) {np.round(t.nominal_point, 4).tolist()}; "
+              f"Client point '{oc.client_reference}' starts at {np.round(ref0, 4).tolist()} = nominal + {oc.client_initial_offset_m:.3f} m "
+              f"along {np.round(direction, 4).tolist()} ({oc.client_offset_direction})", flush=True)
+        tangent = orb.tangent_at(t.theta_nominal)
+        drift_angles = {}
+        for who, v_cmd in (("MEP", c.mep.linear_velocity_w()), ("Client", self.client_commanded_velocity())):
+            n = float(np.linalg.norm(v_cmd))
+            drift_angles[who] = None if n < 1e-12 else math.degrees(math.acos(min(1.0, abs(float(v_cmd @ tangent)) / n)))
+        lo, hi = orb.theta_range
+        print(f"[ORBIT] Earth (sky dome low_earth_orbit.exr): cap of {90.0 - orbit_return.EARTH_LIMB_DIP_DEG:.1f} deg around nadir -Z, limb {orbit_return.EARTH_LIMB_DIP_DEG} deg below the horizon; "
+              f"the ring is concentric with it (normal {np.round(orb.normal, 3).tolist()}). Drawn arc: theta {math.degrees(lo):.1f} .. {math.degrees(hi):.1f} deg "
+              f"({math.degrees(orb.arc_span):.0f} deg), end points {np.round(orb.point_at(lo), 2).tolist()} / {np.round(orb.point_at(hi), 2).tolist()}; "
+              f"tangent at the nominal point {np.round(tangent, 4).tolist()}, drift-to-tangent angle {drift_angles}", flush=True)
+        print(f"[ORBIT] Client start: {off_detail}; nearest orbit point {np.round(q_near, 4).tolist()}, out of the orbit plane {orb.out_of_plane(ref0)*1000:.1f} mm; "
+              f"satellite moved by {np.round(t.placement_shift, 4).tolist()} m to get there", flush=True)
+        print(f"[ORBIT] orbit clearance to the sensor rays (keep-out {oc.sensor_keepout_m} m): "
+              f"{ {k: round(v, 3) for k, v in t.keepout_m.items()} }", flush=True)
+        print(f"[ORBIT] MEP v {np.round(snap['mep_v'], 5).tolist()} m/s w {np.round(snap['mep_w'], 6).tolist()} rad/s | "
+              f"Client v {np.round(snap['client_v'], 5).tolist()} m/s w {np.round(snap['client_w'], 6).tolist()} rad/s | "
+              f"damping MEP {mep_d}, Client {sat_d} (linear, angular)", flush=True)
+        r.metrics["orbit"] = {
+            **orb.describe(), "prim_path": t.prim_path, "segments": oc.segments, "line_width_m": oc.line_width_m, "color_rgb": oc.color_rgb,
+            "center_derived": t.center_derived, "client_reference": oc.client_reference,
+            "theta_nominal_deg": math.degrees(t.theta_nominal), "nominal_point_w": t.nominal_point.tolist(),
+            "client_start_w": ref0.tolist(), "client_start_before_shift_w": t.client_start_before_shift.tolist(),
+            "satellite_placement_shift_m": t.placement_shift.tolist(), "client_offset_direction_w": direction.tolist(),
+            "configured_offset_m": oc.client_initial_offset_m, "measured_start_distance_m": dist,
+            "nearest_orbit_point_at_start_w": q_near.tolist(), "sensor_clearance_m": t.keepout_m,
+            "damping_mep": mep_d, "damping_client": sat_d, "motion_start": snap,
+            "earth_limb_dip_deg": orbit_return.EARTH_LIMB_DIP_DEG, "tangent_at_nominal_w": tangent.tolist(),
+            "drift_to_tangent_deg": drift_angles,
+        }
+        r.check("[ORBIT0] Red reference orbit prim, visual only", prim_ok, prim_detail)
+        r.check("[ORBIT0] Client starts off the orbit by the configured offset", off_ok, off_detail)
+        r.check("[ORBIT0] Orbit clear of the depth ray and the AprilTag corridor", bool(t.keepout_ok),
+                ", ".join(f"{k} {v:.2f} m" for k, v in t.keepout_m.items()) + f" (>= {oc.sensor_keepout_m} m)")
+        tol_v, tol_w = c.drift.velocity_tolerance_mps, c.drift.angular_tolerance_rad_s
+        r.check("[ORBIT0] MEP and Client: no rotation, commanded constant velocity",
+                mep_dv <= tol_v and sat_dv <= tol_v and mep_dw <= tol_w and sat_dw <= tol_w,
+                f"MEP |dv| {mep_dv*1000:.3f} mm/s |w| {mep_dw:.6f} rad/s; Client |dv| {sat_dv*1000:.3f} mm/s |w| {sat_dw:.6f} rad/s "
+                f"(tolerance {tol_v*1000:.1f} mm/s, {tol_w:.4f} rad/s)")
+        # The damping attribute must read back 0 (an unreadable one is left to the free-flight monitor)
+        zero = all(d is None or (d[0] == 0.0 and (math.isnan(d[1]) or d[1] == 0.0)) for d in (mep_d, sat_d))
+        r.check("[ORBIT0] MEP and Client drift along the orbit (tangent at the nominal point)",
+                all(a is None or a <= 10.0 for a in drift_angles.values()),
+                ", ".join(f"{k} {'at rest' if a is None else format(a, '.2f') + ' deg'}" for k, a in drift_angles.items()) + " off the tangent (<= 10 deg)")
+        r.check("[ORBIT0] Linear and angular damping are 0 for both bodies", zero,
+                f"MEP {mep_d}, Client {sat_d} (linear, angular; None = not readable, then only the free-flight monitor guards it)")
+
+    def check_free_flight(self) -> Optional[str]:
+        """A body that is free (MEP not yet captured, Client not yet docked) must keep the commanded
+        velocity and must not turn: anything else (a push, damping, a collision) fails the run."""
+        if self.orbit is None:
+            return None
+        drift = self.cfg.drift
+        bodies = []
+        if not self.capture.is_attached(0):
+            bodies.append(("MEP", self.mep.data, self.cfg.mep.linear_velocity_w()))
+        if not self.task.docking.is_docked:
+            bodies.append(("Client", self.task._satellite.data, self.client_commanded_velocity()))
+        for name, d, cmd in bodies:
+            v, w = d.root_com_lin_vel_w[0].cpu().numpy(), d.root_com_ang_vel_w[0].cpu().numpy()
+            dv, dw = orbit_return.free_flight_deviation(v, cmd, w)
+            st = self._free_flight.setdefault(name, {"samples": 0, "max_dv_mps": 0.0, "max_w_rad_s": 0.0})
+            st["samples"] += 1
+            st["max_dv_mps"], st["max_w_rad_s"] = max(st["max_dv_mps"], dv), max(st["max_w_rad_s"], dw)
+            ok, why = orbit_return.free_flight_ok(drift, v, cmd, w)
+            if not ok:
+                return f"{name} free flight violated at t={self.sim_time:.2f} s: {why} (v {np.round(v, 5).tolist()}, commanded {np.round(cmd, 5).tolist()}, w {np.round(w, 5).tolist()})"
+        return None
+
+    def orbit_guard(self) -> bool:
+        """Checks common to every orbit-return state; False once it has switched to ORBIT_FAILED."""
+        oc, h = self.orbit_cfg, self._orbit
+        if not self.orbit_joint_valid():
+            self.goto(State.ORBIT_FAILED, f"FixedJoint lost (docking joint {self.task.docking.is_docked}, capture joint {self.capture.is_attached(0)})")
+            return False
+        ref = self.client_ref_world().pos
+        prev = h.get("prev_ref")
+        jump = float(np.linalg.norm(ref - prev)) if prev is not None else 0.0
+        h["prev_ref"] = ref.copy()
+        h["max_step_jump_m"] = max(float(h.get("max_step_jump_m", 0.0)), jump)
+        if jump > oc.max_step_jump_m:
+            self.goto(State.ORBIT_FAILED, f"the Client point moved {jump*1000:.1f} mm in one control step (> {oc.max_step_jump_m*1000:.1f} mm): "
+                                          "that is a jump, not a controlled motion")
+            return False
+        margin = self.joint_limit_margin()
+        h["min_joint_margin_rad"] = min(float(h.get("min_joint_margin_rad", math.inf)), margin)
+        if margin < oc.joint_limit_margin_rad:
+            self.goto(State.ORBIT_FAILED, f"an arm joint is {margin:.4f} rad from its limit (< {oc.joint_limit_margin_rad} rad): the target is at the edge of the workspace")
+            return False
+        dp, da = self.orbit_rel_drift()
+        h["max_drift_mm"], h["max_drift_deg"] = max(float(h.get("max_drift_mm", 0.0)), dp), max(float(h.get("max_drift_deg", 0.0)), da)
+        w = float(torch.norm(self.task._satellite.data.root_com_ang_vel_w[0]))
+        h["max_client_w_rad_s"] = max(float(h.get("max_client_w_rad_s", 0.0)), w)
+        h["min_error_m"] = min(float(h.get("min_error_m", math.inf)), self.orbit_error()[0])
+        return True
+
+    def latch_orbit_target(self, target: "orbit_return.OrbitTarget"):
+        """Arm goal for a Client-point target: the Client is rigid with the probe tip (the IK tool)
+        and the orientation is held, so the goal is the tool pose moved by (target - Client point).
+        Latched (not re-derived from the swinging arm every step)."""
+        tool, ref = self.arm.tool_pose(), self.client_ref_world()
+        self._orbit["target"] = {"theta_deg": math.degrees(target.theta), "point": target.point.copy(),
+                                 "distance_at_selection_m": target.distance_m, "client_point": ref.pos.copy()}
+        self._orbit_goal = Frame(tool.pos + (target.point - ref.pos), tool.rot.copy())
+        self._orbit_tangent = self.orbit.orbit.tangent_at(target.theta)
+        self._dock_ref = tool
+        self._dock_speed = 0.0
+        self.q_hold = None
+
+    def step_orbit_target_acquire(self, m):
+        """Pick the orbit point the Client point is carried to: the nearest one the arm can reach."""
+        self.dock_hold()
+        if not self.orbit_guard() or self.state_time < self.cfg.docking.settle_time_s:
+            return
+        oc, h = self.orbit_cfg, self._orbit
+        ref, ee, base = self.client_ref_world(), self.ee_pose(), self.arm.base.pos
+        h["motion_after_dock"] = self.motion_snapshot()
+        h["client_at_dock_w"] = ref.pos.tolist()
+        h["error_at_dock_m"] = self.orbit_error()[0]
+
+        def feasible(p):
+            # The arm's reach limits the EE contact point that holds the MEP (the probe tip / Client
+            # point are metres further out, rigid with it): everything moves by (p - Client point)
+            return orbit_return.reach_feasible(ee.pos + (p - ref.pos), base, oc.arm_reach_min_m, oc.arm_reach_max_m)
+
+        target, tried = orbit_return.select_target(self.orbit.orbit, ref.pos, feasible, oc.max_target_candidates)
+        h["candidates_tried"] = tried[:8]
+        if target is None:
+            self.results.check("[ORBIT1] Orbit target acquired", False, f"no reachable orbit point among {len(tried)} candidates: {tried[:3]}")
+            return self.goto(State.ORBIT_FAILED, f"no reachable orbit point among {len(tried)} candidates (first: {tried[0]['why']})")
+        self.latch_orbit_target(target)
+        goal_dist = float(np.linalg.norm(target.point - ref.pos))
+        h["transfer_distance_m"] = goal_dist
+        self.results.check("[ORBIT1] Orbit target acquired", True,
+                           f"orbit centre {np.round(self.orbit.orbit.center, 3).tolist()}, normal {np.round(self.orbit.orbit.normal, 3).tolist()}, "
+                           f"target {np.round(target.point, 3).tolist()} (theta {math.degrees(target.theta):.1f} deg), Client point {np.round(ref.pos, 3).tolist()} "
+                           f"is {target.distance_m*1000:.0f} mm from it; EE goal {tried[-1]['why']}; "
+                           f"{len([x for x in tried if not x['feasible']])} nearer candidate(s) rejected")
+        print(f"[ORBIT] target acquired: {np.round(target.point, 4).tolist()} (theta {math.degrees(target.theta):.2f} deg), "
+              f"transfer {goal_dist:.3f} m at <= {oc.transfer_speed_mps} m/s, probe-tip goal {np.round(self._orbit_goal.pos, 4).tolist()}", flush=True)
+        self.frame_orbit_view()
+        self.goto(State.ORBIT_TRANSFER)
+
+    def step_orbit_transfer(self, m):
+        """Carry the joined MEP + Client with the arm: continuous IK tracking (rate-limited, decelerating
+        towards the goal). Nothing is written to a body pose and no joint is recreated."""
+        if not self.orbit_guard():
+            return
+        oc, d, h = self.orbit_cfg, self.cfg.docking, self._orbit
+        # Only the distance to the orbit matters, not the position along it: the goal follows the joined bodies
+        # along the orbit tangent, so the arm does not have to stop the (very heavy) Client's sideways drift
+        goal = self._orbit_goal
+        tool = self.arm.tool_pose()
+        if self._orbit_tangent is not None:
+            goal = Frame(goal.pos + self._orbit_tangent * float((tool.pos - goal.pos) @ self._orbit_tangent), goal.rot)
+        pe, _ = pose_errors(tool, goal)
+        speed = probe_dock.decelerated(d, oc.transfer_speed_mps, pe, oc.transfer_decel_gain_hz)
+        self._dock["commanded_speed"] = speed
+        self.track_probe(goal, speed, max_step=0.5 * self.cfg.approach.max_joint_step_rad, follow_satellite=False, hold_tol_m=0.01,
+                         lag_limit_m=oc.transfer_lag_limit_m, accel_mps2=oc.transfer_accel_mps2)
+        if pe < 0.02 and self.tip_settled():
+            if "transfer_checked" not in h:
+                h["transfer_checked"] = True
+                self.results.check("[ORBIT2] Transfer with both FixedJoints kept, no jump", h["max_step_jump_m"] <= oc.max_step_jump_m,
+                                   f"max Client-point step {h['max_step_jump_m']*1000:.3f} mm per control step (<= {oc.max_step_jump_m*1000:.1f}), "
+                                   f"joints valid throughout, min arm joint margin {h['min_joint_margin_rad']:.3f} rad, "
+                                   f"MEP-Client drift {h['max_drift_mm']:.3f} mm / {h['max_drift_deg']:.4f} deg")
+            h["arrival_since"] = None
+            print(f"[ORBIT] transfer finished after {self.state_time:.1f} s: Client point {self.orbit_error()[0]*1000:.1f} mm from the orbit", flush=True)
+            self.goto(State.ORBIT_ARRIVAL_CHECK)
+        elif self.state_time > oc.transfer_timeout_s:
+            self.goto(State.ORBIT_FAILED, f"transfer not finished within {oc.transfer_timeout_s:.0f} s (tool {pe*1000:.0f} mm from its goal, "
+                                          f"orbit error {self.orbit_error()[0]*1000:.0f} mm)")
+
+    def step_orbit_arrival_check(self, m):
+        """All arrival conditions together for `arrival_hold_s`; a residual position error (after the swing has
+        died out) is corrected by a new, smaller transfer to the nearest orbit point."""
+        self.hold()
+        if not self.orbit_guard():
+            return
+        oc, h = self.orbit_cfg, self._orbit
+        err, nearest, theta = self.orbit_error()
+        dp, da = self.orbit_rel_drift()
+        w = float(torch.norm(self.task._satellite.data.root_com_ang_vel_w[0]))
+        ok, bad = orbit_return.arrival_ok(oc, err, self.orbit_joint_valid(), dp, da, w)
+        if ok:
+            if h.get("arrival_since") is None:
+                h["arrival_since"] = self.sim_time
+            if self.sim_time - h["arrival_since"] >= oc.arrival_hold_s:
+                h["arrival"] = {"time_s": self.sim_time, "error_m": err, "drift_mm": dp, "drift_deg": da, "client_w_rad_s": w, "retargets": int(h.get("retargets", 0))}
+                self.results.check("[ORBIT3] Client point on the orbit", True,
+                                   f"{err*1000:.1f} mm from the orbit (<= {oc.arrival_tolerance_m*1000:.0f} mm) at t={self.sim_time:.1f} s, "
+                                   f"MEP-Client drift {dp:.3f} mm / {da:.4f} deg, Client |w| {w:.5f} rad/s, {int(h.get('retargets', 0))} retarget(s)")
+                print(f"[ORBIT] arrived: Client point {err*1000:.1f} mm from the orbit; holding {oc.hold_duration_s:.0f} s", flush=True)
+                self.q_hold = None
+                return self.goto(State.ORBIT_HOLDING)
+            return
+        h["arrival_since"] = None
+        if err > oc.arrival_tolerance_m and self.tip_settled():
+            n = int(h.get("retargets", 0))
+            if n >= oc.max_retargets:
+                self.results.check("[ORBIT3] Client point on the orbit", False, f"{err*1000:.1f} mm from the orbit after {n} corrections: {'; '.join(bad)}")
+                return self.goto(State.ORBIT_FAILED, f"still {err*1000:.1f} mm from the orbit after {n} corrections")
+            h["retargets"] = n + 1
+            print(f"[ORBIT] settled {err*1000:.1f} mm from the orbit (> {oc.arrival_tolerance_m*1000:.0f} mm): correction {n + 1}/{oc.max_retargets}", flush=True)
+            self.latch_orbit_target(orbit_return.OrbitTarget(theta, nearest, err))
+            return self.goto(State.ORBIT_TRANSFER, "correction")
+        if self.state_time > oc.arrival_timeout_s:
+            self.results.check("[ORBIT3] Client point on the orbit", False, "; ".join(bad))
+            self.goto(State.ORBIT_FAILED, "arrival conditions not met: " + "; ".join(bad))
+
+    def step_orbit_holding(self, m):
+        """Hold the joined bodies on the orbit and record the error, the drift and the Client rotation."""
+        self.hold()
+        if not self.orbit_guard():
+            return
+        oc, h = self.orbit_cfg, self._orbit
+        hs = h.setdefault("hold", {"max_error_m": 0.0, "joint_valid": True})
+        err = self.orbit_error()[0]
+        hs["max_error_m"] = max(hs["max_error_m"], err)
+        dp, da = self.orbit_rel_drift()
+        hs["max_drift_mm"], hs["max_drift_deg"] = max(float(hs.get("max_drift_mm", 0.0)), dp), max(float(hs.get("max_drift_deg", 0.0)), da)
+        hs["max_client_w_rad_s"] = max(float(hs.get("max_client_w_rad_s", 0.0)), float(torch.norm(self.task._satellite.data.root_com_ang_vel_w[0])))
+        hs["joint_valid"] = bool(hs["joint_valid"]) and self.orbit_joint_valid()
+        if self.state_time >= oc.hold_duration_s:
+            hs["duration_s"] = self.state_time
+            hs["final_error_m"] = err
+            ok, bad = orbit_return.arrival_ok(oc, hs["max_error_m"], hs["joint_valid"], hs["max_drift_mm"], hs["max_drift_deg"], hs["max_client_w_rad_s"])
+            h["motion_end"] = self.motion_snapshot()
+            self.results.check("[ORBIT4] Held on the orbit", ok,
+                               f"{self.state_time:.1f} s: max orbit error {hs['max_error_m']*1000:.1f} mm (<= {oc.arrival_tolerance_m*1000:.0f}), "
+                               f"max MEP-Client drift {hs['max_drift_mm']:.3f} mm / {hs['max_drift_deg']:.4f} deg, max Client |w| {hs['max_client_w_rad_s']:.5f} rad/s, "
+                               f"FixedJoints valid the whole time: {hs['joint_valid']}" + ("" if ok else "; FAILED: " + "; ".join(bad)))
+            self.goto(State.SUCCESS if ok else State.ORBIT_FAILED, "" if ok else "; ".join(bad))
+
+    ## Visuals / logging
+    def frame_orbit_view(self):
+        """GUI: look at the Client point and its orbit target from above-side."""
+        if self.headless or self.orbit is None:
+            return
+        try:
+            tgt = self._orbit["target"]["point"]
+            mid = 0.5 * (tgt + self.client_ref_world().pos)
+            o = self.orbit.orbit
+            eye = mid + 5.0 * o.normal - 7.0 * o.e2
+            self.sim.set_camera_view(eye=tuple(eye.tolist()), target=tuple(mid.tolist()))
+            print("[VIS] viewport moved to the orbit target", flush=True)
+        except Exception as e:
+            print(f"[VIS] could not move the viewport: {e}", flush=True)
+
+    def save_orbit_view_image(self):
+        """`--orbit-only`: save the image of `cam_orbit_view` (at the GUI start view of the orbit) as
+        `<tag>_orbit_view.png`, to check the red arc against the Earth of the sky dome."""
+        try:
+            import cv2
+
+            from .vision_task import ORBIT_VIEW_CAMERA
+
+            cam = self.scene[ORBIT_VIEW_CAMERA]
+            img = np.ascontiguousarray(cam.data.output["rgb"][0, ..., :3].cpu().numpy().astype(np.uint8))
+            path = self.out_dir / f"{self.label}_orbit_view.png"
+            cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+            eye, target = self.orbit.view()
+            print(f"[ORBIT] view image (eye {np.round(eye, 2).tolist()} -> {np.round(target, 2).tolist()}): {path}", flush=True)
+            self.results.metrics.setdefault("orbit", {})["view_image"] = str(path)
+        except Exception as e:
+            print(f"[ORBIT] view image not saved: {e}", flush=True)
+
+    def update_orbit_visuals(self):
+        """Debug draw in the orbit states: Client point (cyan), orbit target (white) and the line between them."""
+        ref = self.client_ref_world().pos
+        tgt = self._orbit.get("target")
+        aim = tgt["point"] if tgt else self.orbit_error()[1]
+        self.vis.set_scene([], None, None, None, None, ref, aim, axes=[(self.dock_world(), 0.8, 5, 0.6)])
+        self.vis.show()
+
+    def orbit_status(self):
+        """HUD line for the orbit states."""
+        err, nearest, _ = self.orbit_error()
+        tgt = self._orbit.get("target")
+        dp, da = self.orbit_rel_drift()
+        w = float(torch.norm(self.task._satellite.data.root_com_ang_vel_w[0]))
+        print(f"[ORBIT] t={self.sim_time:6.1f}s {self.state.value:<20} orbit error {err*1000:8.1f} mm | "
+              f"target {np.round(tgt['point'], 3).tolist() if tgt else '--'} | Client w {w:.5f} rad/s | MEP-Client drift {dp:.3f} mm {da:.4f} deg | "
+              f"joint margin {self.joint_limit_margin():.3f} rad | joints {'ok' if self.orbit_joint_valid() else 'LOST'} | "
+              f"tool lag {float(self._dock.get('tool_lag_m', math.nan))*1000:.0f} mm, ref->goal "
+              f"{(float(np.linalg.norm(self._orbit_goal.pos - self._dock_ref.pos))*1000 if self._orbit_goal is not None and self._dock_ref is not None else math.nan):.0f} mm | "
+              f"wall-clock {time.time() - self.wall_start:.0f} s", flush=True)
+
+    def print_orbit_failure_context(self):
+        """On every failure: what the orbit-return needs to be debugged from the log alone."""
+        try:
+            ref = self.client_ref_world().pos
+            err, nearest, _ = self.orbit_error()
+            tgt = self._orbit.get("target")
+            sat, mep = self.task._satellite.data, self.mep.data
+            print(f"[ORBIT] failure context: state before {self.state.value} (t={self.sim_time:.2f} s) | Client point {np.round(ref, 4).tolist()} | "
+                  f"orbit error {err*1000:.1f} mm (nearest {np.round(nearest, 4).tolist()}) | target {np.round(tgt['point'], 4).tolist() if tgt else None} | "
+                  f"docking joint {bool(self.task.docking.is_docked)}, capture joint {bool(self.capture.is_attached(0))} | "
+                  f"Client |w| {float(torch.norm(sat.root_com_ang_vel_w[0])):.5f} rad/s, MEP |w| {float(torch.norm(mep.root_com_ang_vel_w[0])):.5f} rad/s | "
+                  f"Client v {np.round(sat.root_com_lin_vel_w[0].cpu().numpy(), 5).tolist()} m/s", flush=True)
+        except Exception as e:  # diagnostics must never hide the failure itself
+            print(f"[ORBIT] failure context unavailable: {e}", flush=True)
+
+    def log_orbit_row(self):
+        ref = self.client_ref_world().pos
+        err, nearest, _ = self.orbit_error()
+        tgt = self._orbit.get("target")
+        sat, mep = self.task._satellite.data, self.mep.data
+        docked = bool(self.task.docking.is_docked) and "rel_at_dock" in self._dock
+        dp, da = self.orbit_rel_drift() if docked else (math.nan, math.nan)
+        row = {"run_id": self.label, "timestamp": round(self.sim_time, 4), "state": self.state.value,
+               "orbit_error_m": err, "orbit_out_of_plane_m": self.orbit.orbit.out_of_plane(ref),
+               "mep_client_drift_mm": dp, "mep_client_drift_deg": da,
+               "docking_joint_valid": int(self.task.docking.is_docked), "capture_joint_valid": int(self.capture.is_attached(0)),
+               "arm_joint_margin_rad": self.joint_limit_margin()}
+        for name, p in (("client_ref", ref), ("orbit_nearest", nearest), ("target", tgt["point"] if tgt else np.full(3, math.nan))):
+            row.update({f"{name}_{a}": float(v) for a, v in zip("xyz", p)})
+        for name, body in (("client", sat), ("mep", mep)):
+            row.update({f"{name}_v{a}": float(v) for a, v in zip("xyz", body.root_com_lin_vel_w[0].cpu().numpy())})
+            row.update({f"{name}_w{a}": float(v) for a, v in zip("xyz", body.root_com_ang_vel_w[0].cpu().numpy())})
+        self._orbit_rows.append(row)
+        if self._orbit_csv is not None:
+            self._orbit_csv.writerow({k: row.get(k, "") for k in ORBIT_CSV_COLUMNS})
 
     ## Depth calibration / logging
     def set_dock_ring_color(self, rgb):
@@ -2085,7 +2625,12 @@ class VisionCaptureDemo:
             "est_age_s": self.estimate_age(), "capture_enabled": self.ros.capture_enabled,
             "start_received": self.ros.start_received, "failure": self.results.failure,
             **{f"est_{k}": val for k, val in m.items()},
+            **({"docked": bool(self.task.docking.is_docked)} if self.cfg.docking.enabled else {}),
+            **({"orbit_error_m": self.orbit_error()[0]} if self.orbit is not None else {}),
         })
+        if self.cfg.docking.enabled:
+            self.ros.publish_docking(self.sim_time, bool(self.task.docking.is_docked), self.dock_world(),
+                                     self.orbit_error()[0] if self.orbit is not None else None)
 
     def status(self):
         lv = self.last_vision
@@ -2141,7 +2686,7 @@ class VisionCaptureDemo:
                 rendered = n % self.render_interval == 0
                 # The docking phase does not use the wrist camera / AprilTags at all
                 vision_due = (rendered and self.sim_time >= self._next_vision_t - 1e-9
-                              and self.state not in DOCKING_STATES)
+                              and self.state not in DOCKING_STATES and not self._observe_only)
                 if rendered:
                     if vision_due:
                         self.vis.clear()  # keep debug draw out of the image used for detection
@@ -2162,6 +2707,8 @@ class VisionCaptureDemo:
                 if self.sim_time >= self._next_log_t:
                     self._next_log_t = self.sim_time + 1.0 / self.cfg.logging.rate_hz - 1e-9
                     self.log_row()
+                    if self.orbit is not None:
+                        self.log_orbit_row()
                 if self.sim_time >= self._next_status_t and self.state not in DOCKING_STATES:
                     self._next_status_t = self.sim_time + 2.0
                     self.status()
@@ -2170,6 +2717,8 @@ class VisionCaptureDemo:
             self._csv_file.close()
         if self._dock_csv_file is not None:
             self._dock_csv_file.close()
+        if self._orbit_csv_file is not None:
+            self._orbit_csv_file.close()
         if self.ros is not None:
             self.publish_ros()  # final state (latched topics keep it for late subscribers)
             self.ros.close()
@@ -2218,7 +2767,9 @@ class VisionCaptureDemo:
             missing, csv_ok = [], None
             r.metrics["csv"] = "disabled (logging.csv_enabled: false)"
 
-        if c.docking.enabled and c.docking.skip_capture:
+        if self._observe_only:
+            r.metrics["capture_phase"] = "skipped (--orbit-only: scene check only)"
+        elif c.docking.enabled and c.docking.skip_capture:
             # The capture phase never ran, so its checks would only report their own
             # absence; the capture is covered by the other scenarios.
             r.metrics["capture_phase"] = "skipped (docking.skip_capture)"
@@ -2228,6 +2779,8 @@ class VisionCaptureDemo:
             self._finish_dynamic(csv_ok, missing)
         if c.docking.enabled:
             self._finish_docking()
+        if self.orbit is not None:
+            self._finish_orbit()
         self._write_video()
         return r
 
@@ -2433,6 +2986,33 @@ class VisionCaptureDemo:
                 r.checks.get("[DOCK5] Docking FixedJoint created", {}).get("detail", "the probe never reached the docking conditions"))
         if not docked:
             r.failure = r.failure or f"docking did not complete (final state {self.state.value})"
+
+    def _finish_orbit(self):
+        """Orbit-scenario results: free flight over the whole run, and what the return phase reached."""
+        c, oc, r, h = self.cfg, self.orbit_cfg, self.results, self._orbit
+        ff = self._free_flight
+        tol_v, tol_w = c.drift.velocity_tolerance_mps, c.drift.angular_tolerance_rad_s
+        ff_ok = bool(ff) and all(x["max_dv_mps"] <= tol_v and x["max_w_rad_s"] <= tol_w for x in ff.values())
+        r.check("[ORBIT0] Free flight held until captured / docked (no rotation, no velocity change)", ff_ok,
+                "; ".join(f"{k}: max |v - v_cmd| {x['max_dv_mps']*1000:.3f} mm/s, max |w| {x['max_w_rad_s']:.6f} rad/s over {x['samples']} steps" for k, x in ff.items())
+                + f" (tolerance {tol_v*1000:.1f} mm/s, {tol_w:.4f} rad/s)" if ff else "the free-flight monitor never ran")
+        m = r.metrics.setdefault("orbit", {})
+        m["free_flight"] = ff
+        m["return_phase"] = "run" if self.orbit_return_active else ("skipped (--orbit-only)" if self._observe_only else "not requested (no docking)")
+        if self._orbit_csv is not None:
+            r.check("[ORBIT] CSV generated", len(self._orbit_rows) > 0, f"{len(self._orbit_rows)} rows -> {getattr(self, 'orbit_csv_path', '')}")
+        if not self.orbit_return_active:
+            return
+        m.update({k: v for k, v in h.items() if k not in ("prev_ref",)})
+        if "target" in m:
+            m["target"] = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in m["target"].items()}
+        # Everything the request lists must have been judged: anything not reached counts as a failure
+        for name in ("[ORBIT1] Orbit target acquired", "[ORBIT2] Transfer with both FixedJoints kept, no jump",
+                     "[ORBIT3] Client point on the orbit", "[ORBIT4] Held on the orbit"):
+            if name not in r.checks:
+                r.check(name, False, f"not reached (final state {self.state.value})")
+        if self.state != State.SUCCESS:
+            r.failure = r.failure or f"orbit return did not complete (final state {self.state.value})"
 
     def _write_video(self):
         import cv2

@@ -41,6 +41,9 @@ ros2 topic pub --once /mrv/cmd/start std_msgs/msg/Empty "{}"
 | out | `state` | std_msgs/String | 상태머신 상태 (latched, 변경 시) |
 | out | `captured` | std_msgs/Bool | FixedJoint 부착 여부 (latched) |
 | out | `status` | std_msgs/String | JSON: 상태, 태그 수, standoff, 추정 기준 capture 량(`est_distance/gap/lateral/angle/rel_vel/rel_ang_vel`), 실패 사유 |
+| out | `docked` | std_msgs/Bool | MEP ↔ Client 도킹 FixedJoint (latched, `--dock` 일 때) |
+| out | `client/pose` | PoseStamped | Client 점 SAT_DOCK_POINT (`--dock` 일 때) |
+| out | `orbit/client_error` | std_msgs/Float64 | Client 점 → reference orbit 거리 [m] (`--orbit-return` 일 때). [`mrv_orbit_return.md`](mrv_orbit_return.md) |
 | out | `/tf` | tf2_msgs/TFMessage | `world → mrv/{ee, cylinder_est, cylinder_pred, cam_wrist, cylinder_gt}` |
 | in | `cmd/start` | std_msgs/Empty | `--ros_wait_start` 일 때 접근 시작 허가 |
 | in | `cmd/abort` | std_msgs/Empty | 중단: 관절 정지, 최종 상태 `ABORTED` (결과 JSON 에 실패로 기록) |

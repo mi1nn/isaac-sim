@@ -16,17 +16,30 @@ two overlap when aligned. The wrist camera looks through the capture cylinder al
 the EE axis; its index of refraction is `capture.cylinder_ior` (1.0: no refraction).
 """
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 from pxr import Gf, Usd, UsdGeom
 
+from srb.core.manager import EventTermCfg, SceneEntityCfg
+from srb.core.mdp import reset_root_state_uniform
 from srb.core.sensor import CameraCfg, PinholeCameraCfg
 from srb.utils.cfg import configclass
 
 from .docking import DockingTask, DockingTaskCfg, prim_frame, prim_scale, set_prim_pose
 from .frames import Frame, frame_from_axes
+from .task import EventCfg
+from .orbit_return import (
+    OrbitReference,
+    OrbitReferenceCfg,
+    client_start_point,
+    derive_center_candidates,
+    initial_offset_check,
+    sensor_keepout_check,
+    tube_mesh,
+)
 from .vision import (
     CAM_MOUNT_QUAT_ROS,
     DEFAULT_CONFIG_PATH,
@@ -47,7 +60,16 @@ VISION_DOCK_OFFSET_M: Tuple[float, float, float] = (0.0, 3.2, 0.0)
 
 
 @configclass
+class VisionEventCfg(EventCfg):
+    # Writes the satellite's init_state (pose + drift velocity) at reset. Only the MEP has such a reset
+    # event in `EventCfg`, so a satellite `init_state.lin_vel` was never applied (measured: v = 0).
+    # Set only when the satellite drifts, so runs without drift keep their previous reset path.
+    randomize_sat_state: EventTermCfg | None = None
+
+
+@configclass
 class VisionCaptureTaskCfg(DockingTaskCfg):
+    events: VisionEventCfg = VisionEventCfg()
     vision_config_path: str = DEFAULT_CONFIG_PATH.as_posix()
     # `section.key=value` overrides of the YAML (see `load_vision_config`)
     vision_overrides: Tuple[str, ...] = ()
@@ -87,6 +109,12 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
         self.scene.satellite.spawn.rigid_props.angular_damping = 0.0
         self.scene.satellite.init_state.lin_vel = tuple(sat_v.tolist())
         self.scene.satellite.init_state.ang_vel = (0.0, 0.0, 0.0)
+        zero = {k: (0.0, 0.0) for k in ("x", "y", "z", "roll", "pitch", "yaw")}
+        self.events.randomize_sat_state = (
+            EventTermCfg(func=reset_root_state_uniform, mode="reset",
+                         params={"asset_cfg": SceneEntityCfg("satellite"), "pose_range": dict(zero), "velocity_range": dict(zero)})
+            if float(np.linalg.norm(sat_v)) > 0.0 else None
+        )
         # RGB-D camera on the Ares1 probe. The prim is a child of the MEP body so it
         # follows it; its pose on the probe axis is measured and written in
         # `_setup_scene` (the probe tip is only known once the USD is on the stage).
@@ -107,6 +135,22 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
                         horizontal_aperture=pc.horizontal_aperture_mm,
                         clipping_range=tuple(pc.clipping_range_m),
                     ),
+                ),
+            )
+        # `--orbit-only`: a camera at the GUI start view of the orbit, to save what the operator would see
+        # (red arc against the Earth of the sky dome). Its pose is written in `_setup_orbit`.
+        if v.orbit_reference.enabled and v.orbit_reference.observe_only:
+            setattr(
+                self.scene,
+                ORBIT_VIEW_CAMERA,
+                CameraCfg(
+                    prim_path=f"{{ENV_REGEX_NS}}/{ORBIT_VIEW_CAMERA}",
+                    offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, 0.0), rot=(1.0, 0.0, 0.0, 0.0), convention="world"),
+                    update_period=0.0,
+                    width=1280,
+                    height=720,
+                    data_types=["rgb"],
+                    spawn=PinholeCameraCfg(focal_length=14.96, horizontal_aperture=20.955, clipping_range=(0.1, 5000.0)),  # 70 deg
                 ),
             )
         c = v.camera
@@ -131,6 +175,36 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
                 ),
             ),
         )
+
+
+ORBIT_VIEW_CAMERA = "cam_orbit_view"
+
+
+@dataclass
+class OrbitSetup:
+    """The Client reference orbit as built for this run (world frame)."""
+
+    cfg: OrbitReferenceCfg
+    orbit: OrbitReference
+    theta_nominal: float
+    nominal_point: np.ndarray  # orbit point the Client nominally sat on
+    client_ref_in_sat: Frame   # the rigid Client point that has to reach the orbit (satellite body frame)
+    client_start: np.ndarray   # its start position (world)
+    client_start_before_shift: np.ndarray
+    placement_shift: np.ndarray  # satellite move applied to reach `client_start` (zero for a derived centre)
+    center_derived: bool
+    keepout_m: Dict[str, float]
+    keepout_ok: bool
+    prim_path: str
+
+    def view(self) -> Tuple[np.ndarray, np.ndarray]:
+        """(eye, target) for the GUI viewport. The eye sits on the ring axis, above the ring plane by
+        radius * tan(view_elevation), looking at the nominal orbit point: the ring is then a circle of
+        constant elevation around the viewer, just like the Earth limb of the sky dome (concentric),
+        `view_elevation_deg` below the horizon (the limb is EARTH_LIMB_DIP_DEG below it)."""
+        o = self.orbit
+        eye = o.center + o.normal * (o.a * float(np.tan(np.radians(self.cfg.view_elevation_deg))))
+        return eye, self.nominal_point.copy()
 
 
 class VisionCaptureTask(DockingTask):
@@ -254,6 +328,125 @@ class VisionCaptureTask(DockingTask):
             cfg.init_state.rot = mep_start.quat
             cfg.init_state.lin_vel = tuple(drift.tolist())
             cfg.init_state.ang_vel = tuple(omega.tolist())
+        ## The satellite's drift also goes to the scene asset's own init state (as for the MEP above);
+        ## the reset event `randomize_sat_state` then writes it to the simulation
+        sat_v = np.asarray(v.docking.satellite_drift_direction, dtype=float) * float(v.docking.satellite_velocity_mps)
+        for cfg in (self.cfg.scene.satellite, self.scene["satellite"].cfg):
+            cfg.init_state.lin_vel = tuple(sat_v.tolist())
+            cfg.init_state.ang_vel = (0.0, 0.0, 0.0)
+
+        ## Client reference orbit (red line) and the Client's start off it
+        self.orbit: Optional[OrbitSetup] = None
+        if v.orbit_reference.enabled:
+            self.orbit = self._setup_orbit(stage, geo, v.orbit_reference, mep_nominal, v)
+
+    def _setup_orbit(self, stage, geo, o: OrbitReferenceCfg, mep_nominal: Frame, v: VisionCaptureConfig) -> OrbitSetup:
+        """Build the reference orbit, place the Client `client_initial_offset_m` off it and draw it.
+
+        The Client keeps its existing (validated) docking placement whenever `center_w` is null: the
+        orbit centre is derived from that placement. With a fixed centre the satellite is moved
+        (before the simulation starts, like every other placement) to nominal point + offset.
+        The orbit is a visual prim only, and must stay clear of the docking axis (`cam_probe` depth
+        ray) and of the wrist-camera-to-tags corridor.
+        """
+        env = self.scene.env_prim_paths[0]
+        ref_in_sat = geo.sat_dock if o.client_reference == "sat_dock_point" else Frame(np.zeros(3), np.eye(3))
+        sat_body = prim_frame(stage, geo.sat_body_path)
+        s0 = (sat_body @ ref_in_sat).pos
+        dock_w = sat_body @ geo.sat_dock
+        axis = dock_w.rot[:, 2]
+        base = prim_frame(stage, f"{env}/robot").pos
+        grasp = mep_nominal @ geo.mep_grasp  # +Z = outward normal of the attachment face (towards the arm)
+
+        if o.center_w is None:
+            candidates = derive_center_candidates(o, s0, axis, base)
+        else:
+            full = OrbitReference.from_cfg(o, o.center_w)
+            full.arc_span = 2.0 * np.pi
+            theta = float(np.radians(o.nominal_angle_deg)) if o.nominal_angle_deg is not None else full.closest(s0)[1]
+            candidates = [(np.asarray(o.center_w, dtype=float), theta)]
+
+        tried = []
+        chosen = None
+        for centre, theta in candidates:
+            orbit = OrbitReference.from_cfg(o, centre, theta)
+            start = client_start_point(o, orbit, theta)
+            shift = start - s0
+            dk = dock_w.pos + shift
+            segments = {
+                # depth ray of cam_probe: pre-dock approach up to the thruster behind the dock point
+                "docking_axis": (dk - axis * (float(self.cfg.docking.dock_depth) + v.docking.pre_dock_distance_m + 2.0), dk + axis * 3.0),
+                # cam_wrist: from the attachment face out along its normal past the observation pose
+                "wrist_camera_corridor": (grasp.pos, grasp.pos + grasp.rot[:, 2] * (v.approach.observe_distance_m + 1.0)),
+            }
+            ok, dist = sensor_keepout_check(orbit, segments, o.sensor_keepout_m)
+            tried.append(dist)
+            if ok:
+                chosen = (orbit, theta, start, shift, dist)
+                break
+        if chosen is None:
+            raise ValueError(
+                f"The reference orbit passes closer than orbit_reference.sensor_keepout_m = {o.sensor_keepout_m} m to a sensor ray "
+                f"(distances per candidate {tried}). A line in front of cam_probe / cam_wrist would corrupt the depth reading / AprilTag pose: "
+                f"change orbit_reference.center_w / normal_w / nominal_angle_deg / client_initial_offset_m."
+            )
+        orbit, theta, start, shift, dist = chosen
+
+        moved = float(np.linalg.norm(shift)) > 1e-9
+        if moved:
+            sat_prim = prim_frame(stage, geo.sat_prim_path)
+            new = Frame(sat_prim.pos + shift, sat_prim.rot)
+            set_prim_pose(stage, geo.sat_prim_path, new)
+            for cfg in (self.cfg.scene.satellite, self.scene["satellite"].cfg):
+                cfg.init_state.pos = tuple(new.pos.tolist())
+        path = spawn_reference_orbit(stage, o, orbit)
+        setup = OrbitSetup(
+            cfg=o, orbit=orbit, theta_nominal=float(theta), nominal_point=orbit.point_at(theta), client_ref_in_sat=ref_in_sat,
+            client_start=start, client_start_before_shift=s0, placement_shift=shift, center_derived=o.center_w is None,
+            keepout_m=dist, keepout_ok=True, prim_path=path,
+        )
+        if o.observe_only:
+            # USD camera looks along its own -Z with +Y up
+            eye, target = setup.view()
+            fwd = (target - eye) / np.linalg.norm(target - eye)
+            set_prim_pose(stage, f"{env}/{ORBIT_VIEW_CAMERA}", frame_from_axes(eye, -fwd, np.cross(fwd, [0.0, 0.0, 1.0])))
+        return setup
+
+
+def spawn_reference_orbit(stage, cfg: OrbitReferenceCfg, orbit: OrbitReference) -> str:
+    """Red tube along the orbit arc (a closed ring when the span is 360 deg) at `cfg.prim_path`: geometry only.
+
+    Visual only: no rigid body, no collider, no physics schema, so nothing collides with it and
+    no contact sensor sees it. A tube mesh (`cfg.line_width_m` across, 8 sides) with an emissive
+    material is used instead of `UsdGeom.BasisCurves`, whose width RTX does not draw reliably.
+    """
+    from pxr import Gf, Sdf, UsdShade, Vt
+
+    if stage.GetPrimAtPath(cfg.prim_path).IsValid():
+        stage.RemovePrim(cfg.prim_path)
+    UsdGeom.Xform.Define(stage, cfg.prim_path)
+    verts, normals, counts, idx = tube_mesh(orbit.points(cfg.segments), orbit.normal, 0.5 * cfg.line_width_m, sides=8, closed=orbit.is_full)
+    mesh = UsdGeom.Mesh.Define(stage, f"{cfg.prim_path}/line")
+    mesh.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(float(x), float(y), float(z)) for x, y, z in verts]))
+    mesh.CreateFaceVertexCountsAttr(Vt.IntArray(counts))
+    mesh.CreateFaceVertexIndicesAttr(Vt.IntArray(idx))
+    mesh.CreateNormalsAttr(Vt.Vec3fArray([Gf.Vec3f(float(x), float(y), float(z)) for x, y, z in normals]))
+    mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
+    mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+    mesh.CreateDoubleSidedAttr(True)
+    lo, hi = verts.min(axis=0), verts.max(axis=0)
+    mesh.CreateExtentAttr([Gf.Vec3f(*(float(x) for x in lo)), Gf.Vec3f(*(float(x) for x in hi))])
+    rgb = Gf.Vec3f(*(float(x) for x in cfg.color_rgb))
+    mesh.CreateDisplayColorAttr([rgb])
+    mat = UsdShade.Material.Define(stage, f"{cfg.prim_path}/Material")
+    sh = UsdShade.Shader.Define(stage, f"{cfg.prim_path}/Material/Shader")
+    sh.CreateIdAttr("UsdPreviewSurface")
+    sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(rgb)
+    sh.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(rgb)
+    sh.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(1.0)
+    mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(mat)
+    return cfg.prim_path
 
 
 def spawn_dock_ring(stage, geo, inner_factor: float = 0.75, segments: int = 96) -> str:

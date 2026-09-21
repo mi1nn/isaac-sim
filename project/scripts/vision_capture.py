@@ -13,6 +13,9 @@ Must run with the Isaac Sim Python (the same interpreter `srb` uses):
     # GUI (debug draw + camera overlay images); after a success the simulation keeps
     # running with the MEP held until the window is closed (--exit_when_done to quit)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic
+    # Client reference orbit (red line), drifting MEP + Client, return onto the orbit after docking
+    # (docs/mrv_orbit_return.md); --dock_only skips the capture, --orbit-only only checks the scene
+    ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --tag orbit_return --dock --orbit-return
 
 Config: `project/config/vision_capture.yaml`; override any value with
 `--set section.key=value` (e.g. `--set mep.linear_velocity_mps=0.02`).
@@ -43,6 +46,11 @@ def parse_args():
                         help="Run the Ares1 probe -> satellite thruster docking phase after the capture (config `docking:`)")
     parser.add_argument("--dock_only", action="store_true",
                         help="--dock, but skip the capture: attach the MEP at its nominal grasp pose and dock straight away")
+    parser.add_argument("--orbit-return", "--orbit_return", dest="orbit_return", action="store_true",
+                        help="Client reference orbit scenario: red orbit, drifting MEP + Client, docking, then carry the docked pair so the Client "
+                             "reaches the orbit (implies --dock; config `orbit_reference:` / `drift:`)")
+    parser.add_argument("--orbit-only", "--orbit_only", dest="orbit_only", action="store_true",
+                        help="Scene check only (no capture / docking / return): red orbit, drifting bodies without rotation, Client's initial offset")
     parser.add_argument("--start_yaw_deg", type=float, default=None, metavar="DEG",
                         help="Start the arm swung DEG degrees in azimuth (about its base axis) so it has to search for the MEP")
     parser.add_argument("--ros", action="store_true",
@@ -122,6 +130,16 @@ def main():
     sets = list(args.sets)
     if args.start_yaw_deg is not None:
         sets.append(f"approach.start_yaw_offset_deg={args.start_yaw_deg}")
+    if args.orbit_return and args.orbit_only:
+        sys.exit("--orbit-return and --orbit-only exclude each other")
+    if (args.orbit_return or args.orbit_only) and args.scenario == "static":
+        sys.exit("the orbit scenarios need --scenario dynamic (both bodies drift)")
+    if args.orbit_return or args.orbit_only:
+        sets.append("orbit_reference.enabled=true")
+    if args.orbit_return:
+        args.dock = True  # the return starts from the docked state
+    if args.orbit_only:
+        sets.append("orbit_reference.observe_only=true")
     if args.dock or args.dock_only:
         sets.append("docking.enabled=true")
     if args.dock_only:
@@ -146,8 +164,12 @@ def main():
         env = gymnasium.make(env_id, cfg=env_cfg)
         env.reset()
         sim = env.unwrapped.sim
-        if not args.headless:
-            sim.set_camera_view(eye=(-1.0, -9.0, 7.0), target=(5.0, -2.7, 3.0))
+        orbit = getattr(env.unwrapped, "orbit", None)
+        if not args.headless or orbit is not None:
+            # orbit scenario: from the ring axis, so the red arc runs parallel to the Earth limb of the
+            # sky dome; otherwise the capture point
+            eye, target = orbit.view() if orbit is not None else ((-1.0, -9.0, 7.0), (5.0, -2.7, 3.0))
+            sim.set_camera_view(eye=tuple(float(x) for x in eye), target=tuple(float(x) for x in target))
         if args.start_paused:
             sim.pause()
             print("[DEMO] PAUSED - press Play in the Isaac Sim toolbar to start", flush=True)
