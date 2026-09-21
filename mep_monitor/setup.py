@@ -14,5 +14,6 @@ setup(
         'monitoring_node = mep_monitor.monitoring_node:main',
         'csv_logger = mep_monitor.csv_logger:main',
         'isaac_metrics_bridge = mep_monitor.isaac_metrics_bridge:main',
+        'docking_metrics_bridge = mep_monitor.docking_metrics_bridge:main',
     ]},
 )
