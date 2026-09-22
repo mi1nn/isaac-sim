@@ -9,8 +9,8 @@ window.Dashboard = {
         responsive: true, maintainAspectRatio: false, animation: false,
         plugins: { legend: { display: false } },
         scales: {
-          x: { grid: { color: '#153344' }, border: { color: '#4a6d82' }, ticks: { color: '#92afc4', maxTicksLimit: 7 } },
-          y: { grid: { color: '#153344' }, border: { color: '#4a6d82' }, ticks: { color: '#92afc4', maxTicksLimit: 5 } }
+          x: { grid: { color: 'rgba(255,255,255,.06)' }, border: { color: 'rgba(255,255,255,.14)' }, ticks: { color: '#8d97a8', maxTicksLimit: 7 } },
+          y: { grid: { color: 'rgba(255,255,255,.06)' }, border: { color: 'rgba(255,255,255,.14)' }, ticks: { color: '#8d97a8', maxTicksLimit: 5 } }
         }, ...options
       }
     });
@@ -18,13 +18,13 @@ window.Dashboard = {
     return chart;
   },
   axis(title, extra = {}) {
-    return { title: { display: true, text: title, color: '#9ab5c9', font: { size: 11 } },
-      grid: { color: '#153344' }, border: { color: '#567486' },
-      ticks: { color: '#92afc4', maxTicksLimit: 6, font: { size: 10 } }, ...extra };
+    return { title: { display: true, text: title, color: '#a4adbd', font: { size: 11 } },
+      grid: { color: 'rgba(255,255,255,.06)' }, border: { color: 'rgba(255,255,255,.14)' },
+      ticks: { color: '#8d97a8', maxTicksLimit: 6, font: { size: 10 } }, ...extra };
   }
 };
 if (window.Chart) {
-  Chart.defaults.color = '#93b4cd';
+  Chart.defaults.color = '#a4adbd';
   Chart.defaults.font.family = "'Segoe UI', Arial, sans-serif";
   Chart.defaults.font.size = 11;
 } else document.getElementById('chart-warning').hidden = false;
@@ -57,8 +57,17 @@ tabs.forEach((tab, index) => {
 });
 function updateClock() {
   const now = new Date();
-  document.getElementById('clock').textContent = now.toISOString().slice(0, 19).replace('T', ' ') + ' (UTC)';
-  document.getElementById('clock').dateTime = now.toISOString();
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false
+  }).formatToParts(now);
+  const value = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  document.getElementById("clock").textContent =
+    value.year + "-" + value.month + "-" + value.day + " " +
+    value.hour + ":" + value.minute + ":" + value.second + " (KST)";
+  document.getElementById("clock").dateTime = now.toISOString();
 }
 updateClock(); setInterval(updateClock, 1000);
 window.initLive();
