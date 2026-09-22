@@ -1,41 +1,42 @@
-<h1 align="center">Space Robotics Bench</h1>
+## 16. `feature/db`
 
-<p align="center">
-  <a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="" src="https://github.com/user-attachments/assets/049289be-0c99-497b-be37-c4975d924524" width="100%"></a>
-</p>
+### 이슈와 수정
 
-[![Discord](https://img.shields.io/badge/Discord-invite-5865F2?logo=discord)](https://discord.gg/p9gZAPWa65)
-[![Docs](https://img.shields.io/badge/docs-online-blue?logo=markdown)](https://AndrejOrsula.github.io/space_robotics_bench)
-[![Rust](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml)
-[![Python](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml)
-[![Docker](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml)
-[![Docs](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml)
+- 기존 `is_success` 하나로는 capture 성공, docking 성공, 전체 mission 성공을 구분할 수 없었다.
+- `capture_success`, `docking_success`, `mission_success`, `failure_stage`, `failure_reason`으로 분리했다.
+- Firebase Admin bridge, batch 400건, 최대 5회 retry, dry-run/emulator 경로를 추가했고 불필요한 `docking_ready` 속성을 제거했다.
 
-<!-- [![Codecov](https://codecov.io/gh/AndrejOrsula/space_robotics_bench/graph/badge.svg)](https://codecov.io/gh/AndrejOrsula/space_robotics_bench) -->
+### 실행 명령
 
-**Space Robotics Bench (SRB)** is a comprehensive collection of environments and tasks for robotics research in the challenging domain of space. It provides a unified framework for developing and validating autonomous systems under diverse extraterrestrial scenarios. At the same time, its design is flexible and extensible to accommodate a variety of development workflows and research directions beyond Earth.
+터미널 1:
 
-## Key Features
+```bash
+git switch feature/db
+source /opt/ros/jazzy/setup.bash
+~/isaac-sim/python.sh project/scripts/vision_capture.py \
+  --scenario dynamic --ros --dock
+```
 
-- **Parallelized Simulation**: Highly parallelized simulation instances for accelerated workflows
-- **Procedural Generation**: On-demand generation of diverse simulation assets and scenes
-- **Domain Randomization**: Extensive randomization for robustness and generalization
-- **Gymnasium API**: Compatibility with standard API and frameworks for robot learning
-- **ROS 2 Interface**: Seamless interoperability with ROS 2 and Space ROS ecosystems
-- **Abstract Architecture**: Flexibility across different robots and space domains
+터미널 2:
 
-## Documentation
+```bash
+source /opt/ros/jazzy/setup.bash
+python3 -m pip install firebase-admin
+python3 project/scripts/firebase_bridge.py --dry_run
+# 실제 DB 사용 시 서비스 계정 파일을 Git 밖에 둔다.
+python3 project/scripts/firebase_bridge.py --credentials /path/to/serviceAccount.json
+```
 
-SRB documentation with detailed installation instructions, usage guides, and development resources is available [online](https://AndrejOrsula.github.io/space_robotics_bench).
+에뮬레이터 사용:
 
-<div align="right">
-<a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="Documentation" src="https://github.com/user-attachments/assets/c8663796-3ef1-4ff7-860b-cf8080d0a07a" width="96" height="96"></a>
-</div>
+```bash
+FIRESTORE_EMULATOR_HOST=localhost:8080 \
+  python3 project/scripts/firebase_bridge.py --project_id demo-mrv
+```
 
-## License
+### 결과
 
-This project is dual-licensed under either the [MIT](project/LICENSE-MIT) or [Apache 2.0](project/LICENSE-APACHE) licenses.
-
-All assets created by contributors of this repository and those generated from [SimForge](https://github.com/AndrejOrsula/simforge) procedural pipelines are licensed under the [CC0 1.0 Universal](https://github.com/AndrejOrsula/srb_assets/blob/main/LICENSE-CC0) license. Resources from third-party sources are listed under [attributions](https://andrejorsula.github.io/space_robotics_bench/misc/attributions.html).
-
-[![CC0 1.0 Universal](https://licensebuttons.net/l/zero/1.0/88x31.png)](https://creativecommons.org/publicdomain/zero/1.0)
+- 현재: 컴파일 통과, Isaac Sim 환경 50개 등록.
+- 커밋 기록: MRV 접근→MEP 부착→Satellite 도킹→DB 저장 확인 완료.
+- 문서 기록: 실제 Firestore/ROS 연결은 미실행으로 남아 있다.
+- 판단: 커밋과 문서의 상태가 상충하므로 새 자격증명으로 end-to-end 재검증 전에는 실제 DB 성공을 확정하지 않는다.
