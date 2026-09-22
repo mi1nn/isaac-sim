@@ -1,41 +1,26 @@
-<h1 align="center">Space Robotics Bench</h1>
+## 4. `feature/grip`
 
-<p align="center">
-  <a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="" src="https://github.com/user-attachments/assets/049289be-0c99-497b-be37-c4975d924524" width="100%"></a>
-</p>
+### 이슈와 수정
 
-[![Discord](https://img.shields.io/badge/Discord-invite-5865F2?logo=discord)](https://discord.gg/p9gZAPWa65)
-[![Docs](https://img.shields.io/badge/docs-online-blue?logo=markdown)](https://AndrejOrsula.github.io/space_robotics_bench)
-[![Rust](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml)
-[![Python](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml)
-[![Docker](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml)
-[![Docs](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml)
+- `srb agent zero`는 모든 action을 0으로 보내 Kinova 그리퍼가 닫히는 동작을 만들었다.
+- 조작 입력이 필요한 시험은 `srb agent manual`로 실행하도록 정리했다.
+- Canadarm3+Kinova300 조작, debris capture 초기화, 물리/기하 검사 스크립트와 작업 로그가 추가됐다.
 
-<!-- [![Codecov](https://codecov.io/gh/AndrejOrsula/space_robotics_bench/graph/badge.svg)](https://codecov.io/gh/AndrejOrsula/space_robotics_bench) -->
+### 실행 명령
 
-**Space Robotics Bench (SRB)** is a comprehensive collection of environments and tasks for robotics research in the challenging domain of space. It provides a unified framework for developing and validating autonomous systems under diverse extraterrestrial scenarios. At the same time, its design is flexible and extensible to accommodate a variety of development workflows and research directions beyond Earth.
+```bash
+git switch feature/grip
+cd project
+srb agent manual --env debris_capture_visual \
+  --kit_args "--ext-folder /home/rokey/isaac-sim/apps --enable isaacsim.exp.base" \
+  env.robot=canadarm3+kinova300_large
 
-## Key Features
+~/isaac-sim/python.sh ../docs/debris_capture_tests/capture_test.py
+~/isaac-sim/python.sh ../docs/debris_capture_tests/manual_test.py
+```
 
-- **Parallelized Simulation**: Highly parallelized simulation instances for accelerated workflows
-- **Procedural Generation**: On-demand generation of diverse simulation assets and scenes
-- **Domain Randomization**: Extensive randomization for robustness and generalization
-- **Gymnasium API**: Compatibility with standard API and frameworks for robot learning
-- **ROS 2 Interface**: Seamless interoperability with ROS 2 and Space ROS ecosystems
-- **Abstract Architecture**: Flexibility across different robots and space domains
+### 결과
 
-## Documentation
-
-SRB documentation with detailed installation instructions, usage guides, and development resources is available [online](https://AndrejOrsula.github.io/space_robotics_bench).
-
-<div align="right">
-<a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="Documentation" src="https://github.com/user-attachments/assets/c8663796-3ef1-4ff7-860b-cf8080d0a07a" width="96" height="96"></a>
-</div>
-
-## License
-
-This project is dual-licensed under either the [MIT](project/LICENSE-MIT) or [Apache 2.0](project/LICENSE-APACHE) licenses.
-
-All assets created by contributors of this repository and those generated from [SimForge](https://github.com/AndrejOrsula/simforge) procedural pipelines are licensed under the [CC0 1.0 Universal](https://github.com/AndrejOrsula/srb_assets/blob/main/LICENSE-CC0) license. Resources from third-party sources are listed under [attributions](https://andrejorsula.github.io/space_robotics_bench/misc/attributions.html).
-
-[![CC0 1.0 Universal](https://licensebuttons.net/l/zero/1.0/88x31.png)](https://creativecommons.org/publicdomain/zero/1.0)
+- 현재: 컴파일 통과, Isaac Sim 환경 48개 등록.
+- 과거 기록: `capture_test.py` 19/19 통과, `manual_test.py` 5/5 통과.
+- 제한: 수동 GUI 조작과 실제 grasp 성공은 현재 세션에서 재실행하지 않았다.
