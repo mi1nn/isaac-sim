@@ -1,41 +1,26 @@
-<h1 align="center">Space Robotics Bench</h1>
+## 10. `feature/docking`
 
-<p align="center">
-  <a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="" src="https://github.com/user-attachments/assets/049289be-0c99-497b-be37-c4975d924524" width="100%"></a>
-</p>
+### 이슈와 수정
 
-[![Discord](https://img.shields.io/badge/Discord-invite-5865F2?logo=discord)](https://discord.gg/p9gZAPWa65)
-[![Docs](https://img.shields.io/badge/docs-online-blue?logo=markdown)](https://AndrejOrsula.github.io/space_robotics_bench)
-[![Rust](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml)
-[![Python](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml)
-[![Docker](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml)
-[![Docs](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml)
+- MEP 캡처 뒤 Ares1 probe를 Client Satellite에 삽입하는 연속 임무가 필요했다.
+- probe/thruster 도킹, 접근 상태기계, 재배치와 속도 조정을 추가했다.
+- 정지·비회전 client 조건에서 capture부터 docking까지 전체 파이프라인이 성공한 기록이 있다.
 
-<!-- [![Codecov](https://codecov.io/gh/AndrejOrsula/space_robotics_bench/graph/badge.svg)](https://codecov.io/gh/AndrejOrsula/space_robotics_bench) -->
+### 실행 명령
 
-**Space Robotics Bench (SRB)** is a comprehensive collection of environments and tasks for robotics research in the challenging domain of space. It provides a unified framework for developing and validating autonomous systems under diverse extraterrestrial scenarios. At the same time, its design is flexible and extensible to accommodate a variety of development workflows and research directions beyond Earth.
+```bash
+git switch feature/docking
+~/isaac-sim/python.sh project/scripts/vision_capture.py \
+  --scenario dynamic --tag dock --headless --dock_only
+~/isaac-sim/python.sh project/scripts/vision_capture.py \
+  --scenario dynamic --tag full --dock
 
-## Key Features
+cd project
+~/isaac-sim/python.sh -m pytest tests/test_probe_dock.py tests/test_vision_math.py -q
+```
 
-- **Parallelized Simulation**: Highly parallelized simulation instances for accelerated workflows
-- **Procedural Generation**: On-demand generation of diverse simulation assets and scenes
-- **Domain Randomization**: Extensive randomization for robustness and generalization
-- **Gymnasium API**: Compatibility with standard API and frameworks for robot learning
-- **ROS 2 Interface**: Seamless interoperability with ROS 2 and Space ROS ecosystems
-- **Abstract Architecture**: Flexibility across different robots and space domains
+### 결과
 
-## Documentation
-
-SRB documentation with detailed installation instructions, usage guides, and development resources is available [online](https://AndrejOrsula.github.io/space_robotics_bench).
-
-<div align="right">
-<a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="Documentation" src="https://github.com/user-attachments/assets/c8663796-3ef1-4ff7-860b-cf8080d0a07a" width="96" height="96"></a>
-</div>
-
-## License
-
-This project is dual-licensed under either the [MIT](project/LICENSE-MIT) or [Apache 2.0](project/LICENSE-APACHE) licenses.
-
-All assets created by contributors of this repository and those generated from [SimForge](https://github.com/AndrejOrsula/simforge) procedural pipelines are licensed under the [CC0 1.0 Universal](https://github.com/AndrejOrsula/srb_assets/blob/main/LICENSE-CC0) license. Resources from third-party sources are listed under [attributions](https://andrejorsula.github.io/space_robotics_bench/misc/attributions.html).
-
-[![CC0 1.0 Universal](https://licensebuttons.net/l/zero/1.0/88x31.png)](https://creativecommons.org/publicdomain/zero/1.0)
+- 현재: 컴파일 통과, Isaac Sim 환경 50개 등록.
+- 과거 기록: 정지 client에서 전체 capture→docking 성공.
+- 제한: 이동/회전 client는 이 브랜치의 성공 범위에 포함되지 않는다.
