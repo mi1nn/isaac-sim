@@ -32,7 +32,7 @@ Playwright 1.63.0은 브라우저 검증용이며 앱 실행에는 필요하지 
 - PLAY: mock 시간 및 그래프 재개. STOP: 시간 및 그래프 정지.
 - RESET: 정지 상태로 시간 0, Position Error 0.018 m, 초기 그래프 복원.
 - 제어 버튼은 브라우저 내부 상태만 변경합니다. 버튼 클릭에 따른 서버 요청은 없습니다.
-- Mission Progress 3/7, APPROACH, MEP CAPTURE PHASE, 속도 0.021 m/s,
+- Mission Progress 3/7, SLOW_APPROACH, MEP CAPTURE PHASE, 속도 0.021 m/s,
   각속도 0.35 deg/s, 남은 거리 0.118 m는 이번 단계에서 고정입니다.
 - 차트의 초기 -60~0초는 가상의 사전 이력이며 현재 이후 최대 121개 표본을 유지합니다.
 - VALIDATION: 상단 KPI 3개, XY 산점도 2개, 원점과 반경 0.05 m tolerance,
