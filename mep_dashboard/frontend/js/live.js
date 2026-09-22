@@ -1,6 +1,20 @@
 'use strict';
+// Mock values below mirror the real mission, so the labels match what firebase_bridge.py
+// / vision_capture_demo.py (branch feature/integration) will actually publish once the
+// live Firestore connection is wired in:
+//   - `state` is a real State enum value (vision_capture_demo.py State), not a made-up label.
+//   - `phase` is the friendly name for firebase_bridge.py's phase classification
+//     (CAPTURE / DOCKING / MISSION -- MISSION_STATES covers MRV approach + moving-client
+//     release/chase/rendezvous/separation).
+//   - The 7-step Mission Progress groups the full state machine into mission-level stages:
+//     1 MRV APPROACH (MRV_MOVE_STEP_1/2, ARM_DEPLOY) -> 2 SEARCH & TRACK (SEARCH..PREDICTING)
+//     -> 3 MEP CAPTURE (APPROACHING..RETREAT, shown here) -> 4 CLIENT RELEASE & CHASE
+//     (CLIENT_RELEASE, CLIENT_CRUISE, CHASE, VELOCITY_MATCHING, RENDEZVOUS)
+//     -> 5 DOCKING APPROACH (DOCK_TARGET_ACQUIRE..FINAL_INSERTION) -> 6 DOCKED & STABILIZE
+//     (DOCKED, STABILIZING, STOPPING) -> 7 RELEASE & SEPARATION (ROBOT_RELEASE, ARM_RETREAT,
+//     MRV_SEPARATION, SUCCESS).
 window.initLive = function () {
-  const initial = { progress: 3, total_steps: 7, state: 'APPROACH', phase: 'MEP CAPTURE PHASE',
+  const initial = { progress: 3, total_steps: 7, state: 'SLOW_APPROACH', phase: 'MEP CAPTURE PHASE',
     position_error: 0.018, total_velocity: 0.021, total_angular_velocity: 0.35, remaining_distance: 0.118 };
   // This is a browser-only preview. Controls never send a network command.
   let running = true;

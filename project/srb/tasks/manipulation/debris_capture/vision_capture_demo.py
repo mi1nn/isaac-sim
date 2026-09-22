@@ -37,6 +37,7 @@ States (Section 26 of the task spec):
 """
 
 import csv
+import ctypes
 import json
 import math
 import signal
@@ -98,6 +99,11 @@ if TYPE_CHECKING:
     from isaacsim.simulation_app import SimulationApp
 
     from .vision_task import VisionCaptureTask
+
+
+# The dashboard consumes ROS image topics; separate Isaac camera windows add
+# render/UI load without providing any required functionality.
+ENABLE_EXTRA_CAMERA_WINDOWS = False
 
 
 class State(Enum):
@@ -442,6 +448,10 @@ class VisionCaptureDemo:
         ## Optional ROS 2 interface (telemetry out, start / abort / capture_enable in)
         self.ros = None
         self._next_ros_t = 0.0
+        self._next_camera_stream_t = 0.0
+        self._camera_stream_period_s = 1.0 / min(float(self.cfg.ros.publish_rate_hz), 5.0)
+        self._live_capture_warmup_frames = 10
+        self._rendered_frame_count = 0
         self._start_wait_logged = False
         self._capture_wait_logged = False
         ## Astrobee observation camera (`astrobee.py`): flies and streams its camera only;
@@ -459,6 +469,18 @@ class VisionCaptureDemo:
             from .ros_interface import VisionRosInterface
 
             self.ros = VisionRosInterface(self.cfg.ros, (self.cfg.camera.width, self.cfg.camera.height), self.k, self.cfg.camera.name)
+        ## Main interactive viewport (API capture, not a screen share): GUI only.
+        self._next_viewport_t = 0.0
+        self._viewport_period_s = 1.0 / 10.0  # Viewport-only target; does not change simulation dt.
+        self._viewport_api = None
+        self._viewport_capture_pending = False
+        if not headless and self.ros is not None:
+            try:
+                from omni.kit.viewport.utility import get_active_viewport
+
+                self._viewport_api = get_active_viewport()
+            except Exception as e:
+                print(f"[VIEWPORT] could not get the active viewport: {e} -- viewport publishing disabled", flush=True)
 
         ## State
         self.state = State.INIT
@@ -3407,6 +3429,25 @@ class VisionCaptureDemo:
         if self._dock_csv is not None:
             self._dock_csv.writerow({k: row.get(k, "") for k in probe_dock.CSV_COLUMNS})
 
+    def publish_live_camera_images(self):
+        """Publish wrist and probe RGB feeds independently of mission state."""
+        if self.ros is None:
+            return
+
+        wrist_out = self.camera.data.output
+        if self.cfg.ros.publish_image and "rgb" in wrist_out:
+            wrist_rgb = wrist_out["rgb"][0].cpu().numpy()[..., :3]
+            wrist_img = np.ascontiguousarray(downsample(wrist_rgb, self.ss))
+            self.ros.publish_image(self.sim_time, wrist_img)
+
+        if self._probe_cam is not None:
+            probe_out = self._probe_cam.data.output
+            if "rgb" in probe_out:
+                probe_img = np.ascontiguousarray(
+                    probe_out["rgb"][0, ..., :3].cpu().numpy().astype(np.uint8)
+                )
+                self.ros.publish_probe_image(self.sim_time, probe_img)
+
     def save_probe_rgb(self):
         """One `cam_probe` RGB frame (the operator's view of the approach)."""
         pc = self.cfg.probe_camera
@@ -3418,6 +3459,7 @@ class VisionCaptureDemo:
         import cv2
 
         img = np.ascontiguousarray(out["rgb"][0, ..., :3].cpu().numpy().astype(np.uint8))
+
         path = self._probe_dir / f"{self.sim_time:07.2f}s_{self.state.value}.png"
         cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
         self._probe_frames.append(path)
@@ -3657,6 +3699,18 @@ class VisionCaptureDemo:
         self.ros.publish_poses(self.sim_time, est, pred, ee, self.goal, self.cam_pose(), v=v, w=w, gt=gt, gt_v=gt_v, gt_w=gt_w,
                                probe=probe, dock=dock)
         m = self.est_capture_metrics()
+        # GT metrics are evaluation/monitoring values only.
+        # They must never be used by the capture controller.
+        m_gt = self.gt_capture_metrics()
+        capture_target_gap = float(self.cfg.approach.final_gap_m)
+        gt_capture_position_error = math.hypot(
+            m_gt["gap"] - capture_target_gap,
+            m_gt["lateral"],
+        )
+        gt_capture_remaining_distance = max(
+            0.0,
+            m_gt["gap"] - capture_target_gap,
+        )
         dm = self._dock_m_latest if docking else None
         lv = self.last_vision
         ok, why = self.tracking_ok()
@@ -3667,6 +3721,18 @@ class VisionCaptureDemo:
             "est_age_s": self.estimate_age(), "capture_enabled": self.ros.capture_enabled,
             "start_received": self.ros.start_received, "failure": self.results.failure,
             **{f"est_{k}": val for k, val in m.items()},
+
+            # Ground-truth capture evaluation metrics.
+            # Controller decisions continue to use only the est_* metrics above.
+            "capture_target_gap_m": capture_target_gap,
+            "gt_capture_position_error_m": gt_capture_position_error,
+            "gt_capture_gap_m": m_gt["gap"],
+            "gt_capture_lateral_error_m": m_gt["lateral"],
+            "gt_capture_orientation_error_deg": m_gt["orientation"],
+            "gt_relative_velocity_mps": m_gt["rel_vel"],
+            "gt_relative_angular_velocity_rad_s": m_gt["rel_ang_vel"],
+            "gt_capture_remaining_distance_m": gt_capture_remaining_distance,
+
             # Docking phase (probe tip -> SAT_DOCK_POINT); the est_* capture metrics above no longer apply then
             "dock_enabled": bool(self.cfg.docking.enabled),  # false: a capture-only run, mission success = capture success
             "dock_active": docking,
@@ -3728,11 +3794,48 @@ class VisionCaptureDemo:
         except Exception as e:  # never let a GUI convenience stop the run
             print(f"[VIS] could not open the camera window(s): {e} -- pick the camera in the viewport camera menu", flush=True)
 
+    def _capture_viewport(self):
+        """Fire-and-forget capture of the main interactive viewport for the
+        dashboard's Isaac Sim viewport panel: only the RTX render buffer
+        (`omni.kit.viewport.utility.capture_viewport_to_buffer`), never a
+        screen share, so no OS window chrome / Isaac Sim UI ever leaks in."""
+        if self._viewport_api is None or self.ros is None or self._viewport_capture_pending:
+            return
+        try:
+            from omni.kit.viewport.utility import capture_viewport_to_buffer
+
+            def on_capture(buffer, buffer_size, width, height, byte_format):
+                self._viewport_capture_pending = False
+                try:
+                    if not buffer or width <= 0 or height <= 0 or buffer_size <= 0:
+                        return
+                    channels = buffer_size // (width * height)
+                    if channels < 3:
+                        return
+                    # `buffer` is a PyCapsule (GPU readback landed in a plain C buffer,
+                    # not a Python bytes object) -- same extraction ctypes uses in
+                    # Kit's own viewport thumbnail generator.
+                    ctypes.pythonapi.PyCapsule_GetPointer.restype = ctypes.POINTER(ctypes.c_byte * buffer_size)
+                    ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+                    content = ctypes.pythonapi.PyCapsule_GetPointer(buffer, None)
+                    arr = np.frombuffer(content.contents, dtype=np.uint8)[: width * height * channels]
+                    arr = arr.reshape(height, width, channels)
+                    self.ros.publish_viewport_image(self.sim_time, arr[:, :, :3])
+                except Exception as e:
+                    print(f"[VIEWPORT] capture callback error: {e}", flush=True)
+
+            self._viewport_capture_pending = True
+            capture_viewport_to_buffer(self._viewport_api, on_capture)
+        except Exception as e:
+            self._viewport_capture_pending = False
+            print(f"[VIEWPORT] capture request failed: {e}", flush=True)
+
     def run(self) -> Results:
         sim, scene = self.sim, self.scene
-        self.open_wrist_view()
-        if self.astrobee is not None:
-            self.astrobee.open_window()
+        if ENABLE_EXTRA_CAMERA_WINDOWS:
+            self.open_wrist_view()
+            if self.astrobee is not None:
+                self.astrobee.open_window()
         vision_period = 1.0 / self.cfg.vision.rate_hz
         n = 0
         self.start()
@@ -3744,9 +3847,32 @@ class VisionCaptureDemo:
         try:
             with torch.no_grad():
                 while self.sim_app.is_running() and not self.done:
+
+                    # Mission control commands must remain responsive even while
+                    # the simulation itself is paused.
+                    if self.ros is not None:
+                        self.ros.poll()
+
+                        # STOP must also work while PAUSED.
+                        if self.ros.abort_requested and self.state not in TERMINAL:
+                            self.goto(State.ABORTED, "ROS cmd/abort")
+
+                        # PAUSE freezes all mission/physics progression but keeps
+                        # ROS callbacks and the GUI responsive. RESUME simply
+                        # clears pause_requested and execution continues here.
+                        if self.ros.pause_requested and self.state not in TERMINAL:
+                            sim.render()
+                            time.sleep(0.02)
+                            continue
+
+                    # Isaac Timeline is not used as the web PAUSE mechanism.
+                    # If it is stopped manually, keep the GUI responsive without
+                    # advancing mission time or physics.
                     if not sim.is_playing():
                         sim.render()
+                        time.sleep(0.02)
                         continue
+
                     self.step()
                     if self._mv_active:
                         # MRV translation (after the arm's IK used this step's base frame),
@@ -3761,6 +3887,8 @@ class VisionCaptureDemo:
                     n += 1
                     self.sim_time += self.dt
                     rendered = n % self.render_interval == 0
+                    if rendered:
+                        self._rendered_frame_count += 1
                     # Neither the docking phase nor the MRV rendezvous phase uses the wrist
                     # camera / AprilTags (the tag search starts once the arm is deployed)
                     vision_due = (rendered and self.sim_time >= self._next_vision_t - 1e-9
@@ -3773,15 +3901,25 @@ class VisionCaptureDemo:
                         if vision_due or not (self.headless and self.cfg.camera.render_on_vision_only):
                             sim.render()
                     scene.update(dt=self.dt)
-                    if rendered and self.astrobee is not None:
+                    capture_warm = self._rendered_frame_count >= self._live_capture_warmup_frames
+                    mission_started = self.ros is None or self.ros.start_received
+                    if (rendered and capture_warm and self.ros is not None
+                            and self.sim_time >= self._next_camera_stream_t):
+                        self._next_camera_stream_t = (
+                            self.sim_time + self._camera_stream_period_s - 1e-9
+                        )
+                        self.publish_live_camera_images()
+                    if rendered and capture_warm and self.astrobee is not None:
                         self.astrobee.after_render(self.sim_time)
+                    if (rendered and capture_warm and mission_started and self._viewport_api is not None
+                            and self.sim_time >= self._next_viewport_t):
+                        self._next_viewport_t = self.sim_time + self._viewport_period_s
+                        self._capture_viewport()
                     if vision_due:
                         self._next_vision_t = self.sim_time + vision_period - 1e-9
                         self.process_image()
                         self.update_visuals()
                         self.vis.show()
-                        if self.ros is not None and self.last_vision is not None and self.last_vision.image is not None:
-                            self.ros.publish_image(self.sim_time, self.last_vision.image)
                     if self.ros is not None and self.sim_time >= self._next_ros_t:
                         self._next_ros_t = self.sim_time + 1.0 / self.cfg.ros.publish_rate_hz - 1e-9
                         self.publish_ros()
