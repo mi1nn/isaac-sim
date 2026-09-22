@@ -2751,7 +2751,7 @@ class VisionCaptureDemo:
         self.hold()
         if "released_at" not in self._mv:
             self._mv["released_at"] = self.sim_time
-            self.capture.release(0)  # removes `{ENV}/capture_joint` (CaptureManager)
+            self.capture.release([0])  # removes `{ENV}/capture_joint` (CaptureManager)
             print(f"[MOVE] robot <-> MEP attachment released ({self._mv['capture_joint']}); "
                   f"MEP <-> client joint {self._mv['docking_joint']} kept (present: {self.task.docking.is_docked})", flush=True)
         if self.state_time < pd.release_wait_sec:
