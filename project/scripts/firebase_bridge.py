@@ -231,14 +231,44 @@ class SessionRecorder:
         if self.session_id is None:
             if terminal:
                 return  # leftover of the previous run
+
+            # Isaac publishes status while waiting for the real mission start.
+            # Do not create a Firestore run until /mrv/cmd/start has actually
+            # been received by the simulator.
+            if not bool(s.get("start_received")):
+                self.last_status = {
+                    **s,
+                    "sim_time_s": t,
+                    "state": state,
+                }
+                return
+
             self._start()
         if "captured" in s:
             self.captured = bool(s["captured"])
         # Compare with the previous /status, not with /captured (that topic arrives first)
         if self.captured and not self._status_captured:
-            self.contact_vel = _num(s.get("est_rel_vel"))  # impact speed at the moment of contact
+            self.contact_vel = _num(s.get("est_rel_vel"))  # legacy estimated impact speed
             self.capture_time = t
-            self.capture_metrics = {k: _num(s.get(f"est_{k}")) for k in ("distance", "lateral", "orientation", "rel_vel")}
+
+            # Legacy capture metrics are preserved for backward compatibility.
+            self.capture_metrics = {
+                k: _num(s.get(f"est_{k}"))
+                for k in ("distance", "lateral", "orientation", "rel_vel")
+            }
+
+            # Ground-truth evaluation metrics.
+            # These are monitoring / validation values only.
+            self.capture_gt_metrics = {
+                "position_error": _num(s.get("gt_capture_position_error_m")),
+                "gap": _num(s.get("gt_capture_gap_m")),
+                "lateral": _num(s.get("gt_capture_lateral_error_m")),
+                "orientation": _num(s.get("gt_capture_orientation_error_deg")),
+                "rel_vel": _num(s.get("gt_relative_velocity_mps")),
+                "rel_ang_vel": _num(s.get("gt_relative_angular_velocity_rad_s")),
+                "remaining_distance": _num(s.get("gt_capture_remaining_distance_m")),
+                "target_gap": _num(s.get("capture_target_gap_m")),
+            }
         self._status_captured = self.captured
         self._track_docking(t, s)
         self.last_status = {**s, "sim_time_s": t, "state": state}
@@ -286,6 +316,17 @@ class SessionRecorder:
             "final_distance_m": None, "final_angle_deg": None, "contact_vel_mps": None,
             "capture_position_error_m": None, "capture_lateral_error_m": None, "capture_orientation_error_deg": None,
             "capture_contact_velocity_mps": None, "capture_time_s": None,
+
+            # GT target-pose capture evaluation (new metric set).
+            "capture_gt_position_error_m": None,
+            "capture_gt_gap_m": None,
+            "capture_gt_lateral_error_m": None,
+            "capture_gt_orientation_error_deg": None,
+            "capture_gt_relative_velocity_mps": None,
+            "capture_gt_relative_angular_velocity_rad_s": None,
+            "capture_gt_remaining_distance_m": None,
+            "capture_target_gap_m": None,
+            "capture_metric_version": None,
             "docking_position_error_m": None, "docking_lateral_error_m": None, "docking_orientation_error_deg": None,
             "docking_insertion_depth_m": None, "docking_relative_velocity_mps": None, "docking_time_s": None,
         })
@@ -294,7 +335,7 @@ class SessionRecorder:
     def _reset_latest_keep_clock(self):
         self.seq, self.last_row_t, self.contact_vel, self._status_captured, self.docked = 0, -math.inf, None, False, False
         self.dock_enabled = self.docking_started = self.docking_success = False
-        self.capture_metrics, self.capture_time, self.dock_t0, self.dock_t_end = {}, None, None, None
+        self.capture_metrics, self.capture_gt_metrics, self.capture_time, self.dock_t0, self.dock_t_end = {}, {}, None, None, None
         self.last_docking_metrics = dict.fromkeys(self.last_docking_metrics)
 
     def _write_row(self, t: float, state: Optional[str], s: Dict[str, Any]):
@@ -357,7 +398,7 @@ class SessionRecorder:
         docking_success = bool(self.docking_success)
         # A capture-only run (no `--dock`) has no docking to fail: docking_success stays null, mission = capture
         mission_success = capture_success and (docking_success if self.dock_enabled else True)
-        cm, dm = self.capture_metrics, self.last_docking_metrics
+        cm, gm, dm = self.capture_metrics, self.capture_gt_metrics, self.last_docking_metrics
         dock_xyz = [dm.get(k) for k in ("relative_x", "relative_y", "relative_z")]
         dock_pos = math.sqrt(sum(v * v for v in dock_xyz)) if all(v is not None for v in dock_xyz) else None
         dock_end = self.dock_t_end if self.dock_t_end is not None else _num(s.get("sim_time_s"))
@@ -374,6 +415,22 @@ class SessionRecorder:
             "capture_orientation_error_deg": cm.get("orientation"),
             "capture_contact_velocity_mps": self.contact_vel,
             "capture_time_s": self.capture_time,
+
+            # GT target-pose capture evaluation.
+            "capture_gt_position_error_m": gm.get("position_error"),
+            "capture_gt_gap_m": gm.get("gap"),
+            "capture_gt_lateral_error_m": gm.get("lateral"),
+            "capture_gt_orientation_error_deg": gm.get("orientation"),
+            "capture_gt_relative_velocity_mps": gm.get("rel_vel"),
+            "capture_gt_relative_angular_velocity_rad_s": gm.get("rel_ang_vel"),
+            "capture_gt_remaining_distance_m": gm.get("remaining_distance"),
+            "capture_target_gap_m": gm.get("target_gap"),
+            "capture_metric_version": (
+                "gt_target_v1"
+                if gm.get("position_error") is not None
+                else None
+            ),
+
             "docking_position_error_m": dock_pos,
             "docking_lateral_error_m": dm.get("lateral_error"),
             "docking_orientation_error_deg": dm.get("orientation_error"),

@@ -2171,6 +2171,13 @@ class VisionCaptureDemo:
         import cv2
 
         img = np.ascontiguousarray(out["rgb"][0, ..., :3].cpu().numpy().astype(np.uint8))
+
+        # Live ROS2 Camera 2 feed.
+        # This uses the existing cam_probe RGB output only; docking/depth
+        # calculations remain unchanged.
+        if self.ros is not None:
+            self.ros.publish_probe_image(self.sim_time, img)
+
         path = self._probe_dir / f"{self.sim_time:07.2f}s_{self.state.value}.png"
         cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
         self._probe_frames.append(path)
@@ -2408,6 +2415,18 @@ class VisionCaptureDemo:
         self.ros.publish_poses(self.sim_time, est, pred, ee, self.goal, self.cam_pose(), v=v, w=w, gt=gt, gt_v=gt_v, gt_w=gt_w,
                                probe=probe, dock=dock)
         m = self.est_capture_metrics()
+        # GT metrics are evaluation/monitoring values only.
+        # They must never be used by the capture controller.
+        m_gt = self.gt_capture_metrics()
+        capture_target_gap = float(self.cfg.approach.final_gap_m)
+        gt_capture_position_error = math.hypot(
+            m_gt["gap"] - capture_target_gap,
+            m_gt["lateral"],
+        )
+        gt_capture_remaining_distance = max(
+            0.0,
+            m_gt["gap"] - capture_target_gap,
+        )
         dm = self._dock_m_latest if docking else None
         lv = self.last_vision
         ok, why = self.tracking_ok()
@@ -2418,6 +2437,18 @@ class VisionCaptureDemo:
             "est_age_s": self.estimate_age(), "capture_enabled": self.ros.capture_enabled,
             "start_received": self.ros.start_received, "failure": self.results.failure,
             **{f"est_{k}": val for k, val in m.items()},
+
+            # Ground-truth capture evaluation metrics.
+            # Controller decisions continue to use only the est_* metrics above.
+            "capture_target_gap_m": capture_target_gap,
+            "gt_capture_position_error_m": gt_capture_position_error,
+            "gt_capture_gap_m": m_gt["gap"],
+            "gt_capture_lateral_error_m": m_gt["lateral"],
+            "gt_capture_orientation_error_deg": m_gt["orientation"],
+            "gt_relative_velocity_mps": m_gt["rel_vel"],
+            "gt_relative_angular_velocity_rad_s": m_gt["rel_ang_vel"],
+            "gt_capture_remaining_distance_m": gt_capture_remaining_distance,
+
             # Docking phase (probe tip -> SAT_DOCK_POINT); the est_* capture metrics above no longer apply then
             "dock_enabled": bool(self.cfg.docking.enabled),  # false: a capture-only run, mission success = capture success
             "dock_active": docking,
@@ -2485,9 +2516,32 @@ class VisionCaptureDemo:
         self.start()
         with torch.no_grad():
             while self.sim_app.is_running() and not self.done:
+
+                # Mission control commands must remain responsive even while
+                # the simulation itself is paused.
+                if self.ros is not None:
+                    self.ros.poll()
+
+                    # STOP must also work while PAUSED.
+                    if self.ros.abort_requested and self.state not in TERMINAL:
+                        self.goto(State.ABORTED, "ROS cmd/abort")
+
+                    # PAUSE freezes all mission/physics progression but keeps
+                    # ROS callbacks and the GUI responsive. RESUME simply
+                    # clears pause_requested and execution continues here.
+                    if self.ros.pause_requested and self.state not in TERMINAL:
+                        sim.render()
+                        time.sleep(0.02)
+                        continue
+
+                # Isaac Timeline is not used as the web PAUSE mechanism.
+                # If it is stopped manually, keep the GUI responsive without
+                # advancing mission time or physics.
                 if not sim.is_playing():
                     sim.render()
+                    time.sleep(0.02)
                     continue
+
                 self.step()
                 scene.write_data_to_sim()
                 sim.step(render=False)
