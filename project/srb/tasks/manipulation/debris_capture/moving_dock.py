@@ -195,6 +195,12 @@ class SeparationCfg:
     # SEPARATION_COLLISION above this net contact force on any arm link [N]
     max_contact_force_n: float = 50.0
     timeout_s: float = 90.0
+    # MRV_SEPARATION: the arm returns to the start pose (folded with `mrv.enabled`, else
+    # the pipeline start pose), joint-space smoothstep over `arm_stow_duration_s` [s],
+    # starting `arm_stow_delay_s` [s] into the departure so the EE first clears the MEP
+    arm_stow: bool = True
+    arm_stow_delay_s: float = 4.0
+    arm_stow_duration_s: float = 10.0
 
 
 def validate_moving_cfg(client: ClientMotionCfg, rv: RendezvousCfg, post: PostDockingCfg, sep: SeparationCfg):
@@ -225,6 +231,8 @@ def validate_moving_cfg(client: ClientMotionCfg, rv: RendezvousCfg, post: PostDo
         raise ValueError("rendezvous.position_gain_hz and max_correction_speed_mps must be >= 0")
     if sep.arm_retreat_distance_m < 0.0 or sep.duration_sec < 0.0:
         raise ValueError("separation.arm_retreat_distance_m and duration_sec must be >= 0")
+    if sep.arm_stow_delay_s < 0.0 or sep.arm_stow_duration_s <= 0.0:
+        raise ValueError("separation.arm_stow_delay_s must be >= 0 and arm_stow_duration_s > 0")
     if not client.release_enabled:
         return
     v = client.velocity()

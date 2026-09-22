@@ -39,6 +39,7 @@ States (Section 26 of the task spec):
 import csv
 import json
 import math
+import signal
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -547,6 +548,7 @@ class VisionCaptureDemo:
         self._mv_force: Dict[str, np.ndarray] = {}
         self._mvm: Dict[str, object] = {}  # measurements of the current step
         self._mv: Dict[str, object] = {}  # bookkeeping / metrics
+        self._arm_stow: Optional[dict] = None  # MRV_SEPARATION arm return (`arm_stow_step`)
         self._mv_rows: List[dict] = []
         self._next_mv_log_t = 0.0
         # Motion trail (world-fixed start cross + a point every `motion_trail_period_s`)
@@ -1488,6 +1490,11 @@ class VisionCaptureDemo:
                 self._next_probe_rgb_t = self.sim_time + self.cfg.probe_camera.rgb_every_sec
                 self.save_probe_rgb()
         else:  # SUCCESS / failures: hold the joints
+            if s == State.SUCCESS and self._mv_active:
+                # The MRV keeps departing (`moving_after_step`); stop the run manually (Ctrl+C).
+                # The arm finishes returning to its start pose if it has not yet.
+                self.arm_stow_step()
+                return
             self.hold()
             if self.state_time >= (0.5 if s == State.SUCCESS else 1.0):
                 self.done = True
@@ -2843,18 +2850,18 @@ class VisionCaptureDemo:
         the departure direction, then stops. The EE leaves the MEP face along its normal
         (the departure direction is the approach axis reversed)."""
         sp = self.cfg.separation
-        self.hold()
         m = self._mvm
         dist = float(np.linalg.norm(m["mrv_p"] - m["client_p"]))
         sep = self._mv.get("separation")
         if sep is None:
-            sep = {"dist0_m": dist, "max_increase_m": 0.0, "max_decrease_m": 0.0, "phase": "accelerate",
+            sep = {"dist0_m": dist, "t0": self.sim_time, "max_increase_m": 0.0, "max_decrease_m": 0.0, "phase": "accelerate",
                    "direction": self._mv_sep_dir.tolist(), "max_drift_mm": 0.0,
                    "mrv_velocity_at_start_mps": self._mv_ctrl.v.tolist()}
             self._mv["separation"] = sep
             print(f"[MOVE] MRV separation along {np.round(self._mv_sep_dir, 3).tolist()} (= -client drift direction): "
                   f"from {np.round(self._mv_ctrl.v * 1000, 1).tolist()} mm/s to {sp.velocity_mps*1000:.0f} mm/s, "
                   f"{sp.duration_sec:.0f} s cruise, then stop", flush=True)
+        self.arm_stow_step()
         v_cruise = self._mv_sep_dir * sp.velocity_mps
         if sep["phase"] == "accelerate" and float(np.linalg.norm(self._mv_ctrl.v - v_cruise)) < 1e-6:
             sep["phase"], sep["cruise_t0"] = "cruise", self.sim_time
@@ -2884,6 +2891,37 @@ class VisionCaptureDemo:
         elif self.state_time > sp.timeout_s:
             self.goto(State.SEPARATION_FAILED, f"departure not finished within {sp.timeout_s:.0f} s "
                                                f"(phase {sep['phase']}, stack still stopping: {not stack_done})")
+
+    def arm_stow_step(self):
+        """MRV_SEPARATION (and the SUCCESS cruise after it): return the arm to the pose it
+        started the run in -- folded with `mrv.enabled`, else the pipeline start pose.
+
+        Joint space, q(t) = q0 + smoothstep((t - t0) / arm_stow_duration_s) (q_start - q0),
+        t0 = separation start + `arm_stow_delay_s` (the EE first clears the MEP face while
+        the MRV reverses). q_start is re-expressed within +-180 deg of q0 (continuous joints)."""
+        sp = self.cfg.separation
+        q_start = self._q_folded if self._q_folded is not None else self._q_deployed
+        sep = self._mv.get("separation")
+        if not sp.arm_stow or q_start is None or sep is None or self.sim_time - sep["t0"] < sp.arm_stow_delay_s:
+            self.hold()
+            return
+        stow = self._arm_stow
+        if stow is None:
+            q0 = self.arm.joint_pos().clone()
+            stow = {"t0": self.sim_time, "q0": q0, "q1": wrap_joint_target(q0, q_start), "done": False}
+            self._arm_stow = stow
+            span = math.degrees(float(torch.max(torch.abs(stow["q1"] - q0))))
+            print(f"[MOVE] arm returning to its start pose over {sp.arm_stow_duration_s:.1f} s "
+                  f"(largest joint travel {span:.1f} deg)", flush=True)
+        u = (self.sim_time - stow["t0"]) / sp.arm_stow_duration_s
+        q = joint_lerp(stow["q0"], stow["q1"], smoothstep(u))
+        self.q_hold = q.clone()
+        self.hold()
+        if u >= 1.0 and not stow["done"]:
+            stow["done"] = True
+            err = math.degrees(float(torch.max(torch.abs(self.arm.joint_pos() - stow["q1"]))))
+            self._mv["arm_stow"] = {"time_s": self.sim_time - stow["t0"], "max_joint_error_deg": err}
+            print(f"[MOVE] arm back at its start pose (max joint error {err:.2f} deg)", flush=True)
 
     def start_stack_stop(self):
         """After the release: the docked MEP + client stack stops by thrust (background)."""
@@ -2938,6 +2976,14 @@ class VisionCaptureDemo:
         immediate = self.cfg.post_docking.immediate_release
         if s == State.MRV_SEPARATION:
             ctrl.toward(self._mv.get("sep_v_target", np.zeros(3)), dt, a_max=self.cfg.separation.accel_mps2)
+            self.mrv.apply(self.mrv.offset + ctrl.v * dt)
+        elif s == State.SUCCESS:
+            # MISSION COMPLETE required the MRV briefly at rest (`step_mrv_separation`,
+            # verifies the departure distance / no drift back); it now resumes the same
+            # cruise and keeps departing indefinitely -- SUCCESS no longer auto-ends the
+            # run (see the state-hold branch below) so the Astrobee has a moving MRV to
+            # follow (`AstrobeeCfg.follow_mrv_after_dock`). Ends only on a manual stop.
+            ctrl.toward(self._mv_sep_dir * self.cfg.separation.velocity_mps, dt, a_max=self.cfg.separation.accel_mps2)
             self.mrv.apply(self.mrv.offset + ctrl.v * dt)
         else:
             if s == State.CHASE:
@@ -3690,57 +3736,65 @@ class VisionCaptureDemo:
         vision_period = 1.0 / self.cfg.vision.rate_hz
         n = 0
         self.start()
-        with torch.no_grad():
-            while self.sim_app.is_running() and not self.done:
-                if not sim.is_playing():
-                    sim.render()
-                    continue
-                self.step()
-                if self._mv_active:
-                    # MRV translation (after the arm's IK used this step's base frame),
-                    # client/MEP thrust, telemetry
-                    self.moving_after_step()
-                elif self._client_live:
-                    self.client_live_step()  # client drifting since t = 0 (MRV still static)
-                if self.astrobee is not None:
-                    self.astrobee.step(self.sim_time, self.state.value)
-                scene.write_data_to_sim()
-                sim.step(render=False)
-                n += 1
-                self.sim_time += self.dt
-                rendered = n % self.render_interval == 0
-                # Neither the docking phase nor the MRV rendezvous phase uses the wrist
-                # camera / AprilTags (the tag search starts once the arm is deployed)
-                vision_due = (rendered and self.sim_time >= self._next_vision_t - 1e-9
-                              and self.state not in DOCKING_STATES and self.state not in MRV_STATES
-                              and not self._mv_active)
-                if rendered:
-                    if vision_due:
-                        self.vis.clear()  # keep debug draw out of the image used for detection
-                    # headless + camera.render_on_vision_only: nothing looks at the other frames
-                    if vision_due or not (self.headless and self.cfg.camera.render_on_vision_only):
+        # SUCCESS on the moving-client pipeline no longer auto-finishes (the MRV keeps
+        # departing for the Astrobee to follow). Ctrl+C is then the way to end the run;
+        # this still exits the loop cleanly so `finish()` below writes the CSV / video /
+        # checks instead of the process dying mid-run.
+        prev_sigint = signal.signal(signal.SIGINT, lambda *_: setattr(self, "done", True))
+        try:
+            with torch.no_grad():
+                while self.sim_app.is_running() and not self.done:
+                    if not sim.is_playing():
                         sim.render()
-                scene.update(dt=self.dt)
-                if rendered and self.astrobee is not None:
-                    self.astrobee.after_render(self.sim_time)
-                if vision_due:
-                    self._next_vision_t = self.sim_time + vision_period - 1e-9
-                    self.process_image()
-                    self.update_visuals()
-                    self.vis.show()
-                    if self.ros is not None and self.last_vision is not None and self.last_vision.image is not None:
-                        self.ros.publish_image(self.sim_time, self.last_vision.image)
-                if self.ros is not None and self.sim_time >= self._next_ros_t:
-                    self._next_ros_t = self.sim_time + 1.0 / self.cfg.ros.publish_rate_hz - 1e-9
-                    self.publish_ros()
-                if self.sim_time >= self._next_log_t:
-                    self._next_log_t = self.sim_time + 1.0 / self.cfg.logging.rate_hz - 1e-9
-                    self.log_row()
-                    if not self._mv_active and self.state not in DOCKING_STATES:
-                        self.update_motion_hud()  # MRV approach / capture lines
-                if self.sim_time >= self._next_status_t and self.state not in DOCKING_STATES:
-                    self._next_status_t = self.sim_time + 2.0
-                    self.status()
+                        continue
+                    self.step()
+                    if self._mv_active:
+                        # MRV translation (after the arm's IK used this step's base frame),
+                        # client/MEP thrust, telemetry
+                        self.moving_after_step()
+                    elif self._client_live:
+                        self.client_live_step()  # client drifting since t = 0 (MRV still static)
+                    if self.astrobee is not None:
+                        self.astrobee.step(self.sim_time, self.state.value)
+                    scene.write_data_to_sim()
+                    sim.step(render=False)
+                    n += 1
+                    self.sim_time += self.dt
+                    rendered = n % self.render_interval == 0
+                    # Neither the docking phase nor the MRV rendezvous phase uses the wrist
+                    # camera / AprilTags (the tag search starts once the arm is deployed)
+                    vision_due = (rendered and self.sim_time >= self._next_vision_t - 1e-9
+                                  and self.state not in DOCKING_STATES and self.state not in MRV_STATES
+                                  and not self._mv_active)
+                    if rendered:
+                        if vision_due:
+                            self.vis.clear()  # keep debug draw out of the image used for detection
+                        # headless + camera.render_on_vision_only: nothing looks at the other frames
+                        if vision_due or not (self.headless and self.cfg.camera.render_on_vision_only):
+                            sim.render()
+                    scene.update(dt=self.dt)
+                    if rendered and self.astrobee is not None:
+                        self.astrobee.after_render(self.sim_time)
+                    if vision_due:
+                        self._next_vision_t = self.sim_time + vision_period - 1e-9
+                        self.process_image()
+                        self.update_visuals()
+                        self.vis.show()
+                        if self.ros is not None and self.last_vision is not None and self.last_vision.image is not None:
+                            self.ros.publish_image(self.sim_time, self.last_vision.image)
+                    if self.ros is not None and self.sim_time >= self._next_ros_t:
+                        self._next_ros_t = self.sim_time + 1.0 / self.cfg.ros.publish_rate_hz - 1e-9
+                        self.publish_ros()
+                    if self.sim_time >= self._next_log_t:
+                        self._next_log_t = self.sim_time + 1.0 / self.cfg.logging.rate_hz - 1e-9
+                        self.log_row()
+                        if not self._mv_active and self.state not in DOCKING_STATES:
+                            self.update_motion_hud()  # MRV approach / capture lines
+                    if self.sim_time >= self._next_status_t and self.state not in DOCKING_STATES:
+                        self._next_status_t = self.sim_time + 2.0
+                        self.status()
+        finally:
+            signal.signal(signal.SIGINT, prev_sigint)
         self.vis.clear()
         if self._csv_file is not None:
             self._csv_file.close()

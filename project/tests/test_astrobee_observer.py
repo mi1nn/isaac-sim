@@ -204,3 +204,37 @@ def test_follow_config_defaults_and_validation():
     assert cfg.astrobee.follow_aim_blend_s == pytest.approx(2.0)
     with pytest.raises(ValueError):
         load_vision_config(overrides=["astrobee.follow_aim_blend_s=-1.0"])
+
+
+def test_closing_distance_is_a_rest_to_rest_trapezoid():
+    total, v, a = 20.0, 3.0, 1.0
+    assert ab.closing_distance(0.0, total, v, a) == pytest.approx(0.0)
+    assert ab.closing_distance(1.0, total, v, a) == pytest.approx(0.5)  # accelerating
+    # cruise at 3 m/s after 3 s: 4.5 m ramp, (20 - 9) / 3 s cruise, 3 s ramp down
+    assert ab.closing_distance(4.0, total, v, a) - ab.closing_distance(3.0, total, v, a) == pytest.approx(3.0)
+    t_end = 3.0 + 11.0 / 3.0 + 3.0
+    assert ab.closing_distance(t_end, total, v, a) == pytest.approx(total)
+    assert ab.closing_distance(t_end + 100.0, total, v, a) == pytest.approx(total)
+    # short move: triangular profile still reaches the total
+    assert ab.closing_distance(10.0, 2.0, v, a) == pytest.approx(2.0)
+    ts = np.linspace(0.0, t_end, 200)
+    d = [ab.closing_distance(t, total, v, a) for t in ts]
+    assert all(b >= c - 1e-12 for b, c in zip(d[1:], d[:-1]))
+
+
+def test_follow_closes_in_along_the_offset_to_the_mrv():
+    pos0, aim0 = np.array([30.0, 0.0, 0.0]), np.zeros(3)
+    mrv0, dock = np.zeros(3), np.array([1.0, 0.0, 0.0])
+    mrv = np.array([-4.0, 0.0, 0.0])
+    pos, _ = ab.follow_mrv_pose(pos0, aim0, mrv0, mrv, dock, 5.0, 2.0, closed_m=20.0)
+    assert np.allclose(pos, mrv + np.array([10.0, 0.0, 0.0]))
+
+
+def test_close_in_config_defaults_and_validation():
+    cfg = load_vision_config()
+    assert cfg.astrobee.follow_close_speed_mps >= 3.0
+    assert cfg.astrobee.follow_close_speed_mps > cfg.separation.velocity_mps
+    with pytest.raises(ValueError):
+        load_vision_config(overrides=["astrobee.follow_close_accel_mps2=0.0"])
+    with pytest.raises(ValueError):
+        load_vision_config(overrides=["separation.arm_stow_duration_s=0.0"])

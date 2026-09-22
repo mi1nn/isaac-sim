@@ -64,6 +64,10 @@ DOCK_COMPLETE_STATES = frozenset({
     "STABILIZING", "STOPPING", "ROBOT_RELEASE", "ARM_RETREAT", "MRV_SEPARATION",  # moving client
 })
 
+# Mission states in which the Astrobee closes in on the departing MRV (faster than it, so
+# the shrinking distance is visible); before them it only keeps its offset to the MRV
+CLOSE_IN_STATES = frozenset({"MRV_SEPARATION", "SUCCESS"})
+
 # Planner phases (the observer turns the first "observe" step into ASTROBEE_OBSERVATION_START)
 _PHASE_STATE = {
     "idle": "ASTROBEE_IDLE",
@@ -138,6 +142,13 @@ class AstrobeeCfg:
     # docking port within `follow_aim_blend_s` [s]
     follow_mrv_after_dock: bool = True
     follow_aim_blend_s: float = 2.0
+    # MRV_SEPARATION (`CLOSE_IN_STATES`): on top of the MRV motion, the Astrobee closes
+    # its distance to the MRV root at `follow_close_speed_mps` [m/s] (trapezoid profile,
+    # `follow_close_accel_mps2` [m/s^2]) along the line towards the MRV, down to
+    # `follow_standoff_m` [m]. Its world speed is then ~ MRV speed + closing speed.
+    follow_close_speed_mps: float = 3.0
+    follow_close_accel_mps2: float = 1.0
+    follow_standoff_m: float = 10.0
     # ROS 2 (only when `ros.enabled`): camera image only
     ros_namespace: str = "astrobee"
     ros_node_name: str = "astrobee_observer"
@@ -161,6 +172,8 @@ def validate_astrobee_cfg(cfg: AstrobeeCfg):
         raise ValueError("astrobee.inspection_azimuths_deg needs at least one point")
     if cfg.follow_aim_blend_s < 0.0:
         raise ValueError("astrobee.follow_aim_blend_s must be >= 0")
+    if cfg.follow_close_speed_mps < 0.0 or cfg.follow_close_accel_mps2 <= 0.0 or cfg.follow_standoff_m < 0.0:
+        raise ValueError("astrobee.follow_close_speed_mps / follow_standoff_m must be >= 0, follow_close_accel_mps2 > 0")
     if int(cfg.loops) < 0:
         raise ValueError("astrobee.loops must be >= 0 (0 = forever)")
     if not cfg.ros_namespace.strip("/") or not cfg.image_topic.strip("/"):
@@ -280,14 +293,40 @@ def ring_radius_from_aabb(aabb_min, aabb_max, margin_m: float) -> float:
     return float(0.5 * math.hypot(size[0], size[1]) + margin_m)
 
 
-def follow_mrv_pose(pos0, aim0, mrv0, mrv, dock, elapsed_s: float, blend_s: float) -> Tuple[np.ndarray, np.ndarray]:
+def closing_distance(elapsed_s: float, total_m: float, speed_mps: float, accel_mps2: float) -> float:
+    """Distance covered after `elapsed_s` [s] of a rest-to-rest trapezoid move of
+    `total_m` [m] (cruise `speed_mps`, accel = decel `accel_mps2`; triangular if short)."""
+    t, d = float(elapsed_s), float(total_m)
+    if t <= 0.0 or d <= 0.0 or speed_mps <= 0.0:
+        return 0.0
+    a = float(accel_mps2)
+    v = min(float(speed_mps), math.sqrt(a * d))  # peak speed
+    ta = v / a
+    tc = (d - v * ta) / v  # cruise time (0 for the triangle)
+    if t < ta:
+        return 0.5 * a * t * t
+    if t < ta + tc:
+        return 0.5 * v * ta + v * (t - ta)
+    td = t - ta - tc
+    if td < ta:
+        return d - 0.5 * a * (ta - td) ** 2
+    return d
+
+
+def follow_mrv_pose(pos0, aim0, mrv0, mrv, dock, elapsed_s: float, blend_s: float,
+                    closed_m: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
     """ASTROBEE_FOLLOW_MRV: (position, aim point) [m, world].
 
     The Astrobee keeps its offset to the MRV from the moment the docking completed
-    (`pos0`, `mrv0`), i.e. it moves by the MRV displacement since then; the aim point
+    (`pos0`, `mrv0`), i.e. it moves by the MRV displacement since then, minus `closed_m`
+    [m] along that offset (closing in on the MRV, see `closing_distance`); the aim point
     blends (smoothstep over `blend_s`) from the observation aim `aim0` to the midpoint of
     the MRV root and the docking port, so the widening gap stays in view."""
-    pos = np.asarray(pos0, dtype=float) + (np.asarray(mrv, dtype=float) - np.asarray(mrv0, dtype=float))
+    offset0 = np.asarray(pos0, dtype=float) - np.asarray(mrv0, dtype=float)
+    n = float(np.linalg.norm(offset0))
+    if closed_m > 0.0 and n > 1e-9:
+        offset0 = offset0 * max(0.0, n - float(closed_m)) / n
+    pos = np.asarray(mrv, dtype=float) + offset0
     target = 0.5 * (np.asarray(mrv, dtype=float) + np.asarray(dock, dtype=float))
     s = smoothstep(elapsed_s / blend_s) if blend_s > 0.0 else 1.0
     return pos, (1.0 - s) * np.asarray(aim0, dtype=float) + s * target
@@ -473,14 +512,27 @@ class AstrobeeObserver:
         signal only when ROS is off (with ROS the MRV state topic is)."""
         torch = self._torch
         self._check_dock_signal(t, mission_state)
+        if self.ros is not None and self._follow is not None and self._follow.get("close_t0") is None:
+            # Close-in signal (`CLOSE_IN_STATES`): same source as the docking-complete one
+            self.ros.poll()
+            mission_state = self.ros.mission_state
         sat = self.sat_frame()
         center = sat.point(self.center_in_sat)
         dock = (sat @ self.sat_dock).pos
         if self._follow is not None:
             f = self._follow
             phase, idx = "follow", self._point
+            if f.get("close_t0") is None and mission_state in CLOSE_IN_STATES:
+                f["close_t0"] = t
+                f["close_total_m"] = max(0.0, float(np.linalg.norm(f["pos0"] - f["mrv0"])) - self.cfg.follow_standoff_m)
+                print(f"[ASTROBEE] {mission_state}: closing in on the MRV, {f['close_total_m']:.1f} m at "
+                      f"{self.cfg.follow_close_speed_mps:.1f} m/s relative (standoff {self.cfg.follow_standoff_m:.1f} m)", flush=True)
+            closed = 0.0
+            if f.get("close_t0") is not None:
+                closed = closing_distance(t - f["close_t0"], f["close_total_m"],
+                                          self.cfg.follow_close_speed_mps, self.cfg.follow_close_accel_mps2)
             pos, aim = follow_mrv_pose(f["pos0"], f["aim0"], f["mrv0"], self.mrv_pos(), dock,
-                                       t - f["t0"], self.cfg.follow_aim_blend_s)
+                                       t - f["t0"], self.cfg.follow_aim_blend_s, closed)
             offset = pos - center
         else:
             phase, offset, idx = self.path.sample(t)
