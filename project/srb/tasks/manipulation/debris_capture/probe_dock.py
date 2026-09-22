@@ -153,6 +153,13 @@ class DockingVisionCfg:
     # Whole docking phase (a state that keeps bouncing resets `stage_timeout_s`)
     phase_timeout_s: float = 600.0
     hold_duration_s: float = 3.0
+    # DOCK_READY gives up (-> DOCK_FAILED) if every condition has not been true at once
+    # for this long. Must span at least half the arm + payload swing period (~20 s, see
+    # `settle_window_s`): a shorter window can land on the outward half of that swing and
+    # declare failure while the tip is still oscillating through the gate, not diverging
+    # (measured: radial recovered to <25 mm mid-window, then swung back out to >65 mm by
+    # a 5 s cutoff, while the MEP-client relative velocity gate cleared only after that).
+    dock_ready_timeout_s: float = 20.0
 
 
 @dataclass

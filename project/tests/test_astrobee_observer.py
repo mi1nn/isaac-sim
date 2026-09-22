@@ -150,13 +150,15 @@ def _calls(tree, attr):
 
 
 def test_astrobee_publishes_the_camera_image_only():
-    """Role separation: one publisher (the image), no subscription, and no import of the
-    vision / capture / docking-control code (the only package imports are frame math, the
-    USD prim-frame helper and the rclpy loader)."""
+    """Role separation: one publisher (the image), one subscription (the existing MRV
+    state topic, docking-complete signal), and no import of the vision / capture /
+    docking-control code (the only package imports are frame math, the USD prim-frame
+    helper and the rclpy loader)."""
     tree = ast.parse((_PKG_DIR / "astrobee.py").read_text())
     pubs = _calls(tree, "create_publisher")
     assert len(pubs) == 1 and ast.unparse(pubs[0].args[0]) == "Image"
-    assert not _calls(tree, "create_subscription")
+    subs = _calls(tree, "create_subscription")
+    assert len(subs) == 1 and ast.unparse(subs[0].args[0]) == "String"
     local = {(n.module, a.name) for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.level == 1 for a in n.names}
     assert local == {("frames", "Frame"), ("docking", "prim_frame"), ("ros_interface", "_import_rclpy")}
 
@@ -164,3 +166,41 @@ def test_astrobee_publishes_the_camera_image_only():
 def test_db_bridge_has_no_astrobee_entries():
     bridge = Path(__file__).resolve().parents[1].joinpath("scripts", "firebase_bridge.py").read_text()
     assert "astrobee" not in bridge.lower()
+
+
+def _mission_states():
+    """`State` enum values of the demo, read from its source (it imports Isaac Lab)."""
+    tree = ast.parse((_PKG_DIR / "vision_capture_demo.py").read_text())
+    cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "State")
+    return {n.value.value for n in cls.body if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)}
+
+
+def test_dock_complete_states_are_real_mission_states():
+    states = _mission_states()
+    assert ab.DOCK_COMPLETE_STATES <= states
+    # nothing before the docking joint exists, and no failure, counts as "docked"
+    assert not ab.DOCK_COMPLETE_STATES & {"DOCK_READY", "FINAL_INSERTION", "DOCK_FAILED", "SUCCESS", "CAPTURED"}
+
+
+def test_follow_moves_with_the_mrv_and_blends_the_aim():
+    pos0, aim0 = np.array([10.0, 20.0, 5.0]), np.array([0.0, 0.0, 0.0])
+    mrv0, dock = np.array([-5.0, 0.0, 0.0]), np.array([3.0, 0.0, 0.0])
+    # at the switch: no jump
+    pos, aim = ab.follow_mrv_pose(pos0, aim0, mrv0, mrv0, dock, 0.0, 2.0)
+    assert np.allclose(pos, pos0) and np.allclose(aim, aim0)
+    # MRV retreats 7 m along -X: the Astrobee moves the same way, same distance
+    mrv = mrv0 + np.array([-7.0, 0.0, 0.0])
+    pos, aim = ab.follow_mrv_pose(pos0, aim0, mrv0, mrv, dock, 5.0, 2.0)
+    assert np.allclose(pos - pos0, mrv - mrv0)
+    assert np.allclose(aim, 0.5 * (mrv + dock))
+    # aim blend is continuous (smoothstep), half way at half the blend time
+    _, mid = ab.follow_mrv_pose(pos0, aim0, mrv0, mrv0, dock, 1.0, 2.0)
+    assert np.allclose(mid, 0.5 * (aim0 + 0.5 * (mrv0 + dock)))
+
+
+def test_follow_config_defaults_and_validation():
+    cfg = load_vision_config()
+    assert cfg.astrobee.follow_mrv_after_dock is True
+    assert cfg.astrobee.follow_aim_blend_s == pytest.approx(2.0)
+    with pytest.raises(ValueError):
+        load_vision_config(overrides=["astrobee.follow_aim_blend_s=-1.0"])

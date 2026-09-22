@@ -117,3 +117,64 @@ ROS_DOMAIN_ID=77 ~/isaac-sim/python.sh project/scripts/vision_capture.py --headl
 ## Next Step
 
 - GUI run: `~/isaac-sim/python.sh project/scripts/vision_capture.py` and check the `cam_astrobee` window.
+
+## 2026-09-22 — Astrobee reacts to docking complete, longer MRV retreat, smaller satellite
+
+Goal: show a minimal control link (docking complete → Astrobee follows the MRV), make the MRV
+retreat after docking clearly visible, and make the probe/thruster docking look tighter.
+The state machine, docking logic, ROS topics and DB structure are unchanged.
+
+### What was checked
+- Docking-complete signal: the existing latched topic `/<ros.namespace>/state` = `/mrv/state`
+  (`std_msgs/String`, RELIABLE + TRANSIENT_LOCAL, `ros_interface.py` `publish_state`, published at
+  `ros.publish_rate_hz` 10 Hz). `DOCKED` lasts one control step, so the Astrobee also accepts the
+  docked states that follow it: `DOCK_HOLDING`, `STABILIZING`, `STOPPING`, `ROBOT_RELEASE`,
+  `ARM_RETREAT`, `MRV_SEPARATION` (`astrobee.DOCK_COMPLETE_STATES`). No new topic.
+- Default flow (`vision_capture.py` turns on `client.release_enabled` whenever docking runs):
+  `DOCKED → ROBOT_RELEASE (immediate_release) → MRV_SEPARATION → SUCCESS`. The MRV retreat is
+  `step_mrv_separation` / `moving_after_step` (`vision_capture_demo.py`). Direction:
+  `separation_direction` = −client drift direction (unchanged). Length: `separation.velocity_mps`,
+  `accel_mps2`, `duration_sec`.
+- Retreat before this change: 0.02 m/s, 0.004 m/s², 5 s cruise → measured +0.25 m MRV–client
+  distance (`logs/vision_capture/full_6dof_result.json`), not visible at this scene scale.
+- Satellite scale: `task.py` `SceneCfg.satellite` `UsdFileCfg.scale`. The satellite is placed from the
+  dock point (`DockingGeometry.placement`: `sat_body = probe_docked @ sat_dock⁻¹`), so the MEP,
+  probe and MRV poses do not move when it is resized; the satellite shrinks around the dock point.
+  At 3.5: probe tip radius 0.080 m, nozzle inner radius at the dock depth 0.466 m.
+
+### Changes
+| Item | Before | After |
+|---|---|---|
+| Astrobee after docking | keeps the observation loop | `ASTROBEE_FOLLOW_MRV`: loop stopped, moves by the MRV root displacement, camera aim blends in 2 s to the MRV↔docking-port midpoint |
+| `separation.velocity_mps` | 0.02 | 0.4 (= MRV transit speed) |
+| `separation.accel_mps2` | 0.004 | 0.1 |
+| `separation.duration_sec` | 5.0 | 15.0 (planned ≈7.6 m in ≈23 s) |
+| Satellite scale | 3.5 | 2.4 (user's choice); dock depth, backstop gap, pre-dock distance and depth offset scale with it (`DockingCfg.reference_scale = 3.5`, `DockingGeometry.length_scale`) |
+
+- `astrobee.py`: `DOCK_COMPLETE_STATES`, `follow_mrv_pose()`, `AstrobeeCfg.follow_mrv_after_dock` /
+  `follow_aim_blend_s`, one `create_subscription(String, "/mrv/state")` in `AstrobeeCameraPublisher`
+  (+ `poll()`), `AstrobeeObserver.step(t, mission_state)` / `_check_dock_signal()`. With ROS off the
+  same state string is passed in-process (fallback, so `--no_ros` still works).
+- `vision_capture_demo.py`: passes `mission_state_topic=f"/{ros.namespace}/state"` and
+  `self.state.value` to `astrobee.step()` (2 call sites). No state or transition changed.
+- `config/vision_capture.yaml`: `separation.*` values above, `astrobee.follow_*`.
+- `tests/test_astrobee_observer.py`: the role test now allows exactly one `String` subscription;
+  new tests for the docked-state set (checked against the demo's `State` enum), the follow pose and the config.
+- DB / `firebase_bridge.py` / Web UI: not changed.
+
+### Verification
+- `python3 -m compileall -q srb/tasks/manipulation/debris_capture scripts`: OK.
+- `pytest tests/test_astrobee_observer.py tests/test_moving_dock.py tests/test_probe_dock.py tests/test_vision_math.py`:
+  90 passed, 4 failed. These are the same 4 known config-default failures listed above.
+- Isaac Sim smoke test (headless, `--dock_only`, `ROS_DOMAIN_ID=77`, satellite 2.4): **stopped, not passed.**
+  - `[ASTROBEE] docking-complete signal: /mrv/state (std_msgs/String)`: the subscription came up.
+  - `[DOCK0] Probe fits the thruster: PASS`: nozzle inner radius at the dock depth 0.319 m (was 0.466 m).
+  - `PRE_DOCK_APPROACH → ALIGNMENT_CHECK → Z_APPROACH (t=48.4 s) → ALIGNMENT_CHECK (t=64.5 s)`, then
+    stuck: lateral error ≈235 mm, wall clearance 13 mm, no progress up to t=92 s (phase timeout 600 s).
+    The probe seems to reach the narrower nozzle wall during insertion. Not confirmed whether the
+    scale change causes it (no comparison run at 3.5).
+  - Not reached, so not verified: docking, the Astrobee switch to `ASTROBEE_FOLLOW_MRV`, the MRV retreat distance.
+
+### Current phase / next step
+- Implementation done; Isaac Sim validation pending (the user runs it).
+- If docking stalls again at 2.4: compare against a run with `scale=(3.5, 3.5, 3.5)` in `task.py` `SceneCfg.satellite` (not a `--set` key).

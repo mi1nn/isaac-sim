@@ -477,8 +477,9 @@ class DockingDemo:
         g = self.ee_target_at_mep()
         a = self.approach
         c = self.cfg
-        depth = self.task.cfg.docking.dock_depth
-        back = depth + c.pre_dock_distance
+        geo = self.task.docking_geometry
+        depth = geo.dock_depth
+        back = depth + c.pre_dock_distance * geo.length_scale
         offset = np.asarray(self.task.cfg.docking.placement.dock_offset, dtype=float)
         dock = translated(g, offset)
         # Grasp: back off along the MEP face normal. Dock: back off along the thruster
@@ -910,7 +911,8 @@ class DockingDemo:
         kp = self.key_poses_nominal
         tip_at_attach = self._tip_at_attach
         dock = self.docking.dock_world()  # SAT_DOCK_POINT, +Z into the nozzle
-        back = self.task.cfg.docking.dock_depth + self.cfg.pre_dock_distance
+        geo = self.task.docking_geometry
+        back = geo.dock_depth + self.cfg.pre_dock_distance * geo.length_scale
         return KeyPoses(
             pre_grasp=kp.pre_grasp,
             grasp=kp.grasp,
@@ -929,7 +931,7 @@ class DockingDemo:
         print(f"[INIT] EE_ATTACH_POINT (link '{self.task.cfg.capture.robot_link}' frame): pos {np.round(g.ee_contact_link.pos, 4).tolist()}, normal {np.round(g.ee_contact_link.rot[:, 2], 4).tolist()}, contact radius {g.ee_contact_radius:.3f} m", flush=True)
         print(f"[INIT] MEP_GRASP_POINT (MEP body frame): pos {np.round(g.mep_grasp.pos, 4).tolist()}, normal {np.round(g.mep_grasp.rot[:, 2], 4).tolist()}, face half-size {g.face.half_extent:.3f} m, area {g.face.area:.2f} m^2", flush=True)
         print(f"[INIT] PROBE_DOCK_POINT (MEP body frame): tip {np.round(g.probe.tip, 4).tolist()}, axis {np.round(g.probe.direction, 4).tolist()}, tip radius {g.probe.tip_radius:.3f} m, rod radius {g.probe.body_radius:.3f} m", flush=True)
-        print(f"[INIT] SAT_DOCK_POINT (satellite body frame): pos {np.round(g.sat_dock.pos, 4).tolist()}, axis {np.round(g.sat_dock.rot[:, 2], 4).tolist()}, nozzle exit radius {g.nozzle.exit_radius:.3f} m, inner radius at dock {g.nozzle.inner_radius(self.task.cfg.docking.dock_depth):.3f} m", flush=True)
+        print(f"[INIT] SAT_DOCK_POINT (satellite body frame): pos {np.round(g.sat_dock.pos, 4).tolist()}, axis {np.round(g.sat_dock.rot[:, 2], 4).tolist()}, nozzle exit radius {g.nozzle.exit_radius:.3f} m, inner radius at dock {g.nozzle.inner_radius(g.dock_depth):.3f} m", flush=True)
         mep, sat = self.mep_frame(), self.docking.sat_frame()
         print(f"[INIT] MEP body (world): pos {np.round(mep.pos, 4).tolist()}, quat(wxyz) {np.round(mep.quat, 4).tolist()}", flush=True)
         print(f"[INIT] Satellite body GOES_R (world): pos {np.round(sat.pos, 4).tolist()}, quat(wxyz) {np.round(sat.quat, 4).tolist()}", flush=True)
@@ -947,7 +949,7 @@ class DockingDemo:
         check("Canadarm3 at its initial joint pose", float(torch.abs(q - qd).max()) < 1e-3, f"max joint error {math.degrees(float(torch.abs(q - qd).max())):.4f} deg")
         self.record("MEP grasp face fits the EE contact disc", g.face.half_extent >= g.ee_contact_radius, f"face half-size {g.face.half_extent:.3f} m >= contact radius {g.ee_contact_radius:.3f} m")
         self.record("MEP grasp face is the outermost surface", g.face.clearance <= 0.001, f"max protrusion beyond the face inside the contact disc {g.face.clearance*1000:.2f} mm")
-        r_dock = g.nozzle.inner_radius(self.task.cfg.docking.dock_depth)
+        r_dock = g.nozzle.inner_radius(g.dock_depth)
         self.record("Probe fits the thruster", g.probe.tip_radius < r_dock - 0.05, f"probe tip radius {g.probe.tip_radius:.3f} m, nozzle inner radius at dock depth {r_dock:.3f} m")
         # The placement must make face-to-face grasp + translation land the probe on the dock point
         kp = self.key_poses_nominal

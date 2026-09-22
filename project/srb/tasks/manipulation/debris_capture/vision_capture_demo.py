@@ -444,14 +444,16 @@ class VisionCaptureDemo:
         self._start_wait_logged = False
         self._capture_wait_logged = False
         ## Astrobee observation camera (`astrobee.py`): flies and streams its camera only;
-        ## nothing of the mission reads it. Created before the vision ROS node so the
-        ## camera feed (which keeps going in `idle()`) owns the rclpy context.
+        ## nothing of the mission reads it. Its one input is the existing latched state
+        ## topic `/<ros.namespace>/state` (docking complete -> follow the MRV retreat).
+        ## Created before the vision ROS node so the camera feed (which keeps going in
+        ## `idle()`) owns the rclpy context.
         self.astrobee = None
         if self.cfg.astrobee.enabled:
             from .astrobee import AstrobeeObserver
 
             self.astrobee = AstrobeeObserver(t, self.cfg.astrobee, self.cfg.ros.enabled, self.cfg.ros.distro, headless,
-                                             out_dir, self.label)
+                                             out_dir, self.label, mission_state_topic=f"/{self.cfg.ros.namespace}/state")
         if self.cfg.ros.enabled:
             from .ros_interface import VisionRosInterface
 
@@ -994,10 +996,12 @@ class VisionCaptureDemo:
                 "probe_tip_radius_m": geo.probe.tip_radius,
                 "sat_dock_in_satellite_m": geo.sat_dock.pos.tolist(),
                 "sat_dock_axis_in_satellite": geo.sat_dock.rot[:, 2].tolist(),
-                "dock_depth_m": float(t.cfg.docking.dock_depth),
-                "backstop_gap_m": float(t.cfg.docking.backstop_gap),
+                "dock_depth_m": geo.dock_depth,
+                "backstop_gap_m": geo.backstop_gap,
+                "satellite_length_scale": geo.length_scale,
+                "pre_dock_distance_m": float(c.docking.pre_dock_distance_m) * geo.length_scale,
                 "nozzle_exit_radius_m": geo.nozzle.exit_radius,
-                "nozzle_inner_radius_at_dock_m": geo.nozzle.inner_radius(t.cfg.docking.dock_depth),
+                "nozzle_inner_radius_at_dock_m": geo.nozzle.inner_radius(geo.dock_depth),
                 "satellite_velocity_mps": (np.asarray(c.docking.satellite_drift_direction) * c.docking.satellite_velocity_mps).tolist(),
                 "probe_camera": ({"pos_in_mep_m": t.probe_cam_in_mep.pos.tolist(),
                                   "axis_in_mep": t.probe_cam_in_mep.rot[:, 2].tolist(),
@@ -1011,10 +1015,10 @@ class VisionCaptureDemo:
                     float(np.linalg.norm(sat_v0 - sat_cmd)) < 1e-4
                     and float(np.linalg.norm(self.task._satellite.data.root_com_ang_vel_w[0].cpu().numpy())) < 1e-6,
                     f"satellite v {np.round(sat_v0, 5).tolist()} m/s (commanded {np.round(sat_cmd, 5).tolist()}), w = 0")
-            r.check("[DOCK0] Probe fits the thruster", geo.probe.tip_radius < geo.nozzle.inner_radius(t.cfg.docking.dock_depth) - c.docking.min_wall_clearance_m,
-                    f"probe tip radius {geo.probe.tip_radius:.3f} m, nozzle inner radius at the dock depth {geo.nozzle.inner_radius(t.cfg.docking.dock_depth):.3f} m")
+            r.check("[DOCK0] Probe fits the thruster", geo.probe.tip_radius < geo.nozzle.inner_radius(geo.dock_depth) - c.docking.min_wall_clearance_m,
+                    f"probe tip radius {geo.probe.tip_radius:.3f} m, nozzle inner radius at the dock depth {geo.nozzle.inner_radius(geo.dock_depth):.3f} m")
             print(f"[INIT] PROBE_DOCK_POINT (MEP body): tip {np.round(geo.probe_dock.pos, 4).tolist()}, axis {np.round(geo.probe_dock.rot[:, 2], 4).tolist()}, tip radius {geo.probe.tip_radius:.3f} m", flush=True)
-            print(f"[INIT] SAT_DOCK_POINT (satellite body): pos {np.round(geo.sat_dock.pos, 4).tolist()}, axis {np.round(geo.sat_dock.rot[:, 2], 4).tolist()}, dock_depth {t.cfg.docking.dock_depth} m", flush=True)
+            print(f"[INIT] SAT_DOCK_POINT (satellite body): pos {np.round(geo.sat_dock.pos, 4).tolist()}, axis {np.round(geo.sat_dock.rot[:, 2], 4).tolist()}, dock_depth {geo.dock_depth:.3f} m (x{geo.length_scale:.3f} of the scale-{t.cfg.docking.reference_scale:g} values)", flush=True)
             if c.docking.skip_capture:
                 if self.skip_capture_to_docking():
                     if self.moving:
@@ -1300,7 +1304,7 @@ class VisionCaptureDemo:
                 # Astrobee clock only (`sim_time` stays at the end of the scenario)
                 t_obs = self.sim_time + n * self.dt
                 if self.astrobee is not None:
-                    self.astrobee.step(t_obs)
+                    self.astrobee.step(t_obs, self.state.value)
                 scene.write_data_to_sim()
                 sim.step(render=False)
                 n += 1
@@ -1855,7 +1859,8 @@ class VisionCaptureDemo:
         m["geometry_distance"] = -m["axial"]  # remaining insertion distance [m]
         raw, px = self.read_probe_depth()
         m["depth_raw"], m["depth_pixels"] = raw, float(px)
-        offset = self._depth_offset if self._depth_offset is not None else d.depth_surface_offset_m
+        # (the configured fallback is a scale-reference length like `dock_depth`)
+        offset = self._depth_offset if self._depth_offset is not None else d.depth_surface_offset_m * self.geo.length_scale
         m["depth_distance"] = probe_dock.depth_to_dock_distance(raw, self._cam_to_tip, offset)
         ok, why = probe_dock.depth_valid(d, m["depth_distance"], m["geometry_distance"])
         m["depth_ok"], self._depth_reason = float(ok), why
@@ -1911,8 +1916,9 @@ class VisionCaptureDemo:
 
     def _pre_dock_axial(self) -> float:
         """Axial coordinate of the pre-dock pose: `pre_dock_distance_m` in front of the
-        nozzle *exit*, i.e. `dock_depth + pre_dock_distance` before SAT_DOCK_POINT."""
-        return -(float(self.task.cfg.docking.dock_depth) + float(self.cfg.docking.pre_dock_distance_m))
+        nozzle *exit*, i.e. `dock_depth + pre_dock_distance` before SAT_DOCK_POINT (both
+        scaled with the satellite, `DockingGeometry.length_scale`)."""
+        return -(self.geo.dock_depth + float(self.cfg.docking.pre_dock_distance_m) * self.geo.length_scale)
 
     def track_probe(self, goal: Frame, speed: float, max_step: Optional[float] = None):
         """Rate-limited probe-tip tracking with the satellite's motion fed forward.
@@ -2183,7 +2189,7 @@ class VisionCaptureDemo:
             self.q_hold = self.arm.joint_pos().clone()
             self.goto(State.DOCKED if self.task.docking.is_docked else State.DOCK_FAILED,
                       "" if self.task.docking.is_docked else "the docking joint was not created")
-        elif self.state_time > 5.0:
+        elif self.state_time > d.dock_ready_timeout_s:
             self.results.check("[DOCK4] Docking conditions", False, "; ".join(bad))
             self.goto(State.DOCK_FAILED, "docking conditions not met: " + "; ".join(bad))
 
@@ -3319,14 +3325,14 @@ class VisionCaptureDemo:
             "lateral_at_calibration_m": m["lateral"],
             "axis_at_calibration_deg": m["axis_deg"],
             "configured_surface_offset_m": cfgd,
-            "backstop_gap_m": float(self.task.cfg.docking.backstop_gap),
+            "backstop_gap_m": self.geo.backstop_gap,
             "geometry_distance_m": m["geometry_distance"],
             "depth_raw_m": m["depth_raw"],
             "camera_to_tip_m": self._cam_to_tip,
         }
         print(f"[DOCK] depth calibration at the pre-dock pose (on the axis: lateral {m['lateral']*1000:.1f} mm, axis {m['axis_deg']:.2f} deg; "
               f"median of {len(samples)}, spread {np.ptp(samples)*1000:.1f} mm): raw {m['depth_raw']:.3f} m, geometry {m['geometry_distance']:.3f} m "
-              f"-> surface offset {self._depth_offset:.3f} m (configured {cfgd:.3f} m, back plate at {self.task.cfg.docking.backstop_gap:.3f} m)", flush=True)
+              f"-> surface offset {self._depth_offset:.3f} m (configured {cfgd:.3f} m, back plate at {self.geo.backstop_gap:.3f} m)", flush=True)
 
     def log_dock_row(self, m):
         row = {
@@ -3697,7 +3703,7 @@ class VisionCaptureDemo:
                 elif self._client_live:
                     self.client_live_step()  # client drifting since t = 0 (MRV still static)
                 if self.astrobee is not None:
-                    self.astrobee.step(self.sim_time)
+                    self.astrobee.step(self.sim_time, self.state.value)
                 scene.write_data_to_sim()
                 sim.step(render=False)
                 n += 1

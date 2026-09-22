@@ -68,7 +68,8 @@ class SceneCfg(ManipulationSceneCfg):
         prim_path="{ENV_REGEX_NS}/satellite",
         spawn=UsdFileCfg(
             usd_path=SRB_ASSETS_DIR_SPACE.joinpath("satellite_v3.usd").as_posix(),
-            scale=(3.5, 3.5, 3.5),
+            # Was 3.5; the docking lengths scale with it (`DockingCfg.reference_scale`)
+            scale=(2.4, 2.4, 2.4),
             collision_props=CollisionPropertiesCfg(),
             ## NOTE: The GOES_R meshes author no collision approximation, which PhysX
             ## rejects on a dynamic body (one error per mesh) before silently falling

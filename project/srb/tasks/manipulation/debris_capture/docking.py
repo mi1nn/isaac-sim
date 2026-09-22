@@ -333,9 +333,15 @@ class DockingCfg:
     ## Satellite
     satellite_body_rel: str = "GOES_R"
     thruster_rel: str = "GOES_R/Thruster"
-    # Depth of SAT_DOCK_POINT inside the nozzle exit, along the thruster axis [m]
+    # Satellite spawn scale at which the metric docking lengths below (and the vision
+    # config `docking.pre_dock_distance_m`) were tuned. They are multiplied by
+    # (actual satellite scale / reference_scale), so the dock point, back plate and
+    # pre-dock (offset) point keep the same place relative to the thruster nozzle when
+    # the satellite is resized (`DockingGeometry.length_scale`).
+    reference_scale: float = 3.5
+    # Depth of SAT_DOCK_POINT inside the nozzle exit, along the thruster axis [m at reference_scale]
     dock_depth: float = 0.8
-    # The back plate that stops the probe sits this far behind the dock point [m]
+    # The back plate that stops the probe sits this far behind the dock point [m at reference_scale]
     backstop_gap: float = 0.1
     # Hollow thruster collider (replaces the solid convex hull of the nozzle mesh)
     wall_segments: int = 16
@@ -376,8 +382,12 @@ class DockingGeometry:
         ## Satellite frames (satellite body frame)
         sat = prim_frame(stage, self.sat_body_path)
         self.sat_scale = prim_scale(stage, self.sat_body_path)
+        # Docking lengths follow the satellite size (see `DockingCfg.reference_scale`)
+        self.length_scale = float(np.mean(self.sat_scale)) / float(cfg.reference_scale)
+        self.dock_depth = float(cfg.dock_depth) * self.length_scale  # [m]
+        self.backstop_gap = float(cfg.backstop_gap) * self.length_scale  # [m]
         self.nozzle = extract_nozzle(stage, f"{self.sat_prim_path}/{cfg.thruster_rel}", sat)
-        dock_point = self.nozzle.exit_centre + cfg.dock_depth * self.nozzle.direction
+        dock_point = self.nozzle.exit_centre + self.dock_depth * self.nozzle.direction
         # SAT_DOCK_POINT: +Z = into the nozzle; +X = satellite body +X
         self.sat_dock = frame_from_axes(dock_point, self.nozzle.direction, [1.0, 0.0, 0.0])
         self.sat_exit = frame_from_axes(self.nozzle.exit_centre, self.nozzle.direction, [1.0, 0.0, 0.0])
@@ -493,7 +503,7 @@ def build_thruster_collider(stage: Usd.Stage, geo: DockingGeometry, cfg: Docking
     root = f"{geo.sat_body_path}/DockingThrusterCollider"
     UsdGeom.Xform.Define(stage, root)
     nz = geo.nozzle
-    plate_depth = cfg.dock_depth + cfg.backstop_gap
+    plate_depth = geo.dock_depth + geo.backstop_gap
     r0, r1 = nz.inner_radius(0.0), nz.inner_radius(plate_depth)
     t = cfg.wall_thickness
     length = math.hypot(plate_depth, r0 - r1)

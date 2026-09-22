@@ -9,6 +9,13 @@ estimation or vision tracking, no satellite state / angular-velocity estimate, n
 feasibility (no DOCKING_AVAILABLE / DOCKING_UNAVAILABLE), no mission decision, no command
 to the Canadarm3 / MEP / docking pipeline. Nothing it does feeds back into the mission.
 
+The one input it reacts to (`follow_mrv_after_dock`): the mission state on the existing
+latched MRV topic `/<ros.namespace>/state` (std_msgs/String, `ros_interface.py`; with
+ROS off, the same state string handed over in-process). Once it reports a docked state
+(`DOCK_COMPLETE_STATES`), the observation loop stops for good and the Astrobee follows
+the MRV's retreat: it moves by the MRV root displacement since that moment and turns
+its camera onto the MRV / docking port (ASTROBEE_FOLLOW_MRV).
+
 Motion: a simplified, kinematic 6-DoF flight (no propulsion, drag or gravity model; the
 model is visual only -- no rigid body, no collider, so it cannot touch the scene). The
 path is anchored at the satellite's *simulation* pose (ground truth, only to place the
@@ -18,6 +25,7 @@ path; it is not measured, estimated or published):
     -> ASTROBEE_OBSERVATION_START -> ASTROBEE_OBSERVING (dwell at each inspection point,
     smooth arc to the next one, `loops` times; 0 = until the run ends)
     -> ASTROBEE_OBSERVATION_COMPLETE (holds at the last point, camera still on)
+    any of these -> ASTROBEE_FOLLOW_MRV (docking complete: follows the MRV retreat)
 
 The states are internal (console log only): they are not published and not shown in the UI.
 
@@ -45,7 +53,16 @@ ASTROBEE_STATES = (
     "ASTROBEE_OBSERVATION_START",
     "ASTROBEE_OBSERVING",
     "ASTROBEE_OBSERVATION_COMPLETE",
+    "ASTROBEE_FOLLOW_MRV",
 )
+
+# Mission states (`vision_capture_demo.State` values on `/<ros.namespace>/state`) that mean
+# "the MEP is docked": DOCKED itself lasts one control step and the topic is published at
+# `ros.publish_rate_hz`, so the states that follow it count as well
+DOCK_COMPLETE_STATES = frozenset({
+    "DOCKED", "DOCK_HOLDING",  # static client
+    "STABILIZING", "STOPPING", "ROBOT_RELEASE", "ARM_RETREAT", "MRV_SEPARATION",  # moving client
+})
 
 # Planner phases (the observer turns the first "observe" step into ASTROBEE_OBSERVATION_START)
 _PHASE_STATE = {
@@ -95,7 +112,7 @@ class AstrobeeCfg:
     usd_relpath: str = "astrobee/astrobee.usd"
     prim_name: str = "astrobee"
     # Display scale of the 0.32 m NASA model, like the other scaled assets of this scene
-    # (satellite x3.5, MRV hull x3.4); the camera mount scales with it
+    # (satellite x2.4, MRV hull x3.4); the camera mount scales with it
     scale: float = 3.0
     # Path around the satellite. The horizontal ring radius is the satellite's
     # horizontal AABB half-diagonal + `orbit_margin_m`; the ring sits `elevation_deg`
@@ -116,6 +133,11 @@ class AstrobeeCfg:
     look_at_dock_weight: float = 0.5
     # Full loops over the inspection points before ASTROBEE_OBSERVATION_COMPLETE (0: forever)
     loops: int = 0
+    # Docking complete (see the module docstring): stop observing and follow the MRV retreat.
+    # The camera aim moves from the observation aim point to the midpoint MRV root <->
+    # docking port within `follow_aim_blend_s` [s]
+    follow_mrv_after_dock: bool = True
+    follow_aim_blend_s: float = 2.0
     # ROS 2 (only when `ros.enabled`): camera image only
     ros_namespace: str = "astrobee"
     ros_node_name: str = "astrobee_observer"
@@ -137,6 +159,8 @@ def validate_astrobee_cfg(cfg: AstrobeeCfg):
         raise ValueError("astrobee.elevation_deg must be in [-80, 80]")
     if len(cfg.inspection_azimuths_deg) < 1:
         raise ValueError("astrobee.inspection_azimuths_deg needs at least one point")
+    if cfg.follow_aim_blend_s < 0.0:
+        raise ValueError("astrobee.follow_aim_blend_s must be >= 0")
     if int(cfg.loops) < 0:
         raise ValueError("astrobee.loops must be >= 0 (0 = forever)")
     if not cfg.ros_namespace.strip("/") or not cfg.image_topic.strip("/"):
@@ -256,6 +280,19 @@ def ring_radius_from_aabb(aabb_min, aabb_max, margin_m: float) -> float:
     return float(0.5 * math.hypot(size[0], size[1]) + margin_m)
 
 
+def follow_mrv_pose(pos0, aim0, mrv0, mrv, dock, elapsed_s: float, blend_s: float) -> Tuple[np.ndarray, np.ndarray]:
+    """ASTROBEE_FOLLOW_MRV: (position, aim point) [m, world].
+
+    The Astrobee keeps its offset to the MRV from the moment the docking completed
+    (`pos0`, `mrv0`), i.e. it moves by the MRV displacement since then; the aim point
+    blends (smoothstep over `blend_s`) from the observation aim `aim0` to the midpoint of
+    the MRV root and the docking port, so the widening gap stays in view."""
+    pos = np.asarray(pos0, dtype=float) + (np.asarray(mrv, dtype=float) - np.asarray(mrv0, dtype=float))
+    target = 0.5 * (np.asarray(mrv, dtype=float) + np.asarray(dock, dtype=float))
+    s = smoothstep(elapsed_s / blend_s) if blend_s > 0.0 else 1.0
+    return pos, (1.0 - s) * np.asarray(aim0, dtype=float) + s * target
+
+
 def camera_world_pose(body: Frame, cfg: AstrobeeCfg) -> Frame:
     """Camera frame in W (Isaac Lab "world" convention: +X forward, +Z up)."""
     mount = Frame.from_pos_quat(np.asarray(cfg.camera.mount_pos_body_m, dtype=float) * cfg.scale, CAM_IN_BODY_QUAT)
@@ -268,15 +305,17 @@ def camera_world_pose(body: Frame, cfg: AstrobeeCfg) -> Frame:
 
 
 class AstrobeeCameraPublisher:
-    """ROS 2 publisher of the Astrobee camera image. Nothing else is published."""
+    """ROS 2 publisher of the Astrobee camera image. Nothing else is published; the only
+    subscription is the existing MRV mission state topic (docking-complete signal)."""
 
-    def __init__(self, cfg: AstrobeeCfg, distro: str):
+    def __init__(self, cfg: AstrobeeCfg, distro: str, mission_state_topic: Optional[str] = None):
         from .ros_interface import _import_rclpy
 
         rclpy = self.rclpy = _import_rclpy(distro)
         from rclpy.executors import SingleThreadedExecutor
-        from rclpy.qos import QoSProfile, ReliabilityPolicy
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
         from sensor_msgs.msg import Image
+        from std_msgs.msg import String
 
         self._image = Image
         self._owns_context = not rclpy.ok()
@@ -292,6 +331,19 @@ class AstrobeeCameraPublisher:
         self.frame_id = f"{cfg.ros_namespace}/{cfg.camera.name}"
         self.topic = f"/{cfg.ros_namespace}/{cfg.image_topic}"
         print(f"[ASTROBEE] ROS 2 camera feed on {self.topic} (sensor_msgs/Image rgb8)", flush=True)
+        self.mission_state: Optional[str] = None
+        if mission_state_topic:
+            # Same QoS as the publisher (`ros_interface.py` `state`: latched)
+            latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+            self.node.create_subscription(String, mission_state_topic, self._on_mission_state, latched)
+            print(f"[ASTROBEE] docking-complete signal: {mission_state_topic} (std_msgs/String)", flush=True)
+
+    def _on_mission_state(self, msg):
+        self.mission_state = str(msg.data)
+
+    def poll(self):
+        """Deliver a pending mission-state message (non-blocking)."""
+        self._executor.spin_once(timeout_sec=0.0)
 
     def publish(self, t: float, image: np.ndarray):
         from builtin_interfaces.msg import Time
@@ -324,7 +376,7 @@ class AstrobeeObserver:
     """
 
     def __init__(self, task, cfg: AstrobeeCfg, ros_enabled: bool, ros_distro: str, headless: bool,
-                 out_dir: Optional[Path] = None, label: str = "run"):
+                 out_dir: Optional[Path] = None, label: str = "run", mission_state_topic: Optional[str] = None):
         import torch
         from pxr import Usd, UsdGeom
 
@@ -338,6 +390,7 @@ class AstrobeeObserver:
         self._xform_device = self.xform.get_world_poses()[0].device
         self.camera = task.scene[cfg.camera.name]
         self.sat = task._satellite
+        self.mrv = task._robot  # MRV articulation root (moved by `MrvTransit`)
         env_path = task.scene.env_prim_paths[0]
         self.camera_path = f"{env_path}/{cfg.camera.name}"
         stage = task.scene.stage
@@ -357,7 +410,7 @@ class AstrobeeObserver:
         self.path = ObservationPath(cfg, radius, dock_w - center_w)
         self.ros: Optional[AstrobeeCameraPublisher] = None
         if ros_enabled:
-            self.ros = AstrobeeCameraPublisher(cfg, ros_distro)
+            self.ros = AstrobeeCameraPublisher(cfg, ros_distro, mission_state_topic if cfg.follow_mrv_after_dock else None)
         self.state: Optional[str] = None
         self.frames = 0
         self.saved = 0
@@ -365,6 +418,9 @@ class AstrobeeObserver:
         self._next_save_t = 0.0
         self._point = -1
         self._window = None
+        self._aim: Optional[np.ndarray] = None
+        # ASTROBEE_FOLLOW_MRV: set once, when the docking-complete signal arrives
+        self._follow: Optional[dict] = None
         # Flight speed for the GUI "Docking monitor" (display only): from consecutive
         # commanded poses, world frame and relative to the satellite centre [m/s]
         self.speed_mps = 0.0
@@ -394,21 +450,52 @@ class AstrobeeObserver:
             self.state = state
             print(f"[ASTROBEE] {state}{'  ' + detail if detail else ''}", flush=True)
 
-    def step(self, t: float):
-        """Place the Astrobee and its camera for time `t` [s, simulation]."""
+    def mrv_pos(self) -> np.ndarray:
+        return self.mrv.data.root_pos_w[0].cpu().numpy().astype(float)
+
+    def _check_dock_signal(self, t: float, mission_state: Optional[str]):
+        """Docking-complete signal: the MRV state topic when ROS is on, else `mission_state`."""
+        if self._follow is not None or not self.cfg.follow_mrv_after_dock or self._last is None:
+            return
+        if self.ros is not None:
+            self.ros.poll()
+            mission_state = self.ros.mission_state
+        if mission_state in DOCK_COMPLETE_STATES:
+            self._follow = {"t0": t, "pos0": self._last[1].copy(), "aim0": self._aim.copy(), "mrv0": self.mrv_pos()}
+            print(f"[ASTROBEE] docking complete ({mission_state}"
+                  f"{' on ROS' if self.ros is not None else ''}): observation loop stopped at "
+                  f"{np.round(self._last[1], 2).tolist()}, following the MRV from {np.round(self._follow['mrv0'], 2).tolist()}", flush=True)
+
+    def step(self, t: float, mission_state: Optional[str] = None):
+        """Place the Astrobee and its camera for time `t` [s, simulation].
+
+        `mission_state`: the mission state in-process, used as the docking-complete
+        signal only when ROS is off (with ROS the MRV state topic is)."""
         torch = self._torch
-        phase, offset, idx = self.path.sample(t)
+        self._check_dock_signal(t, mission_state)
         sat = self.sat_frame()
         center = sat.point(self.center_in_sat)
-        pos = center + offset
-        aim = center + self.cfg.look_at_dock_weight * ((sat @ self.sat_dock).pos - center)
+        dock = (sat @ self.sat_dock).pos
+        if self._follow is not None:
+            f = self._follow
+            phase, idx = "follow", self._point
+            pos, aim = follow_mrv_pose(f["pos0"], f["aim0"], f["mrv0"], self.mrv_pos(), dock,
+                                       t - f["t0"], self.cfg.follow_aim_blend_s)
+            offset = pos - center
+        else:
+            phase, offset, idx = self.path.sample(t)
+            pos = center + offset
+            aim = center + self.cfg.look_at_dock_weight * (dock - center)
+        self._aim = np.asarray(aim, dtype=float)
         body = Frame(pos, look_at_rotation(pos, aim))
         if self._last is not None and t > self._last[0]:
             dt = t - self._last[0]
             self.speed_mps = float(np.linalg.norm(pos - self._last[1])) / dt
             self.rel_speed_mps = float(np.linalg.norm(offset - self._last[2])) / dt
         self._last = (t, pos.copy(), np.asarray(offset, dtype=float).copy())
-        if phase == "observe" and self.state in (None, "ASTROBEE_IDLE", "ASTROBEE_APPROACH"):
+        if phase == "follow":
+            self._set_state("ASTROBEE_FOLLOW_MRV")
+        elif phase == "observe" and self.state in (None, "ASTROBEE_IDLE", "ASTROBEE_APPROACH"):
             self._set_state("ASTROBEE_OBSERVATION_START", "at inspection point 1")
         else:
             self._set_state(_PHASE_STATE[phase])
