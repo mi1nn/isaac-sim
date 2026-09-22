@@ -174,6 +174,9 @@ class ProbeCameraCfg:
     # Near clip must stay below the final probe-to-back-plate gap (`backstop_gap`)
     clipping_range_m: List[float] = field(default_factory=lambda: [0.01, 30.0])
     offset_from_tip_m: float = 0.02
+    # Roll about the viewing direction [deg], clockwise as seen from behind the camera.
+    # 90: image upright (was 0 = rolled 90 deg CCW)
+    image_roll_deg: float = 90.0
     # Save an RGB frame every this many seconds (0: off); written next to the metrics CSV
     rgb_every_sec: float = 1.0
 

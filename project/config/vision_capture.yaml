@@ -50,6 +50,9 @@ camera:
   # along the capture direction (link -Z). The flange face is at z = -0.44 m and the
   # EE contact face (end of the capture cylinder) at z = -0.84 m.
   mount_link_z_m: -0.45
+  # Roll about the viewing axis [deg], clockwise as seen from behind the camera
+  # (0 = the old mount, image rolled 90 deg CCW; 90 = upright)
+  image_roll_deg: 90.0
   # RTX anti-aliasing for the whole app: Off | FXAA | DLSS | TAA | DLAA
   antialiasing: "Off"
   # Render `supersample` x the resolution and area-downsample (anti-aliasing of the tag edges).
@@ -413,6 +416,9 @@ probe_camera:
   horizontal_aperture_mm: 20.955
   clipping_range_m: [0.01, 30.0]
   offset_from_tip_m: 0.02
+  # Roll about the viewing axis [deg], clockwise as seen from behind the camera
+  # (0 = the old mount, image rolled 90 deg CCW; 90 = upright)
+  image_roll_deg: 90.0
   rgb_every_sec: 1.0
 
 ## ---------------------------------------------------------------------------------
@@ -533,3 +539,50 @@ separation:
   min_distance_increase_m: 0.1
   max_contact_force_n: 50.0
   timeout_s: 90.0
+
+## ---------------------------------------------------------------------------------
+## Astrobee satellite observation (`astrobee.py`, `vision_capture.py --no_astrobee`)
+##   ASTROBEE_IDLE -> ASTROBEE_APPROACH -> ASTROBEE_OBSERVATION_START
+##   -> ASTROBEE_OBSERVING (inspection points around the satellite) -> ASTROBEE_OBSERVATION_COMPLETE
+## An observation / monitoring camera only: it computes nothing, decides nothing and
+## never touches the MEP capture / docking pipeline (visual model, no collider). Its one
+## output is the camera image on ROS 2 (/astrobee/camera/image_raw, when ros.enabled).
+## Model: NASA astrobee_media meshes (Apache-2.0), `project/scripts/build_astrobee_usd.py`.
+## World frame, SI units.
+## ---------------------------------------------------------------------------------
+astrobee:
+  enabled: true
+  usd_relpath: astrobee/astrobee.usd
+  prim_name: astrobee
+  # Display scale of the 0.32 m model (the scene's satellite is x3.5, the MRV hull x3.4)
+  scale: 3.0
+  start_delay_s: 0.0
+  # Straight-in approach to inspection point 1 from this far outside the ring
+  approach_distance_m: 20.0
+  approach_speed_mps: 1.0
+  # Ring radius = satellite horizontal AABB half-diagonal + margin; ring height from the elevation
+  orbit_margin_m: 25.0
+  elevation_deg: 25.0
+  # Azimuth [deg] about world +Z from the direction satellite centre -> docking port
+  inspection_azimuths_deg: [45.0, 135.0, 225.0, 315.0]
+  dwell_s: 5.0
+  transit_speed_mps: 2.0
+  # Camera aim between the satellite centre (0) and its docking port (1)
+  look_at_dock_weight: 0.5
+  # Full loops before ASTROBEE_OBSERVATION_COMPLETE (0 = until the run ends)
+  loops: 0
+  ros_namespace: astrobee
+  ros_node_name: astrobee_observer
+  image_topic: camera/image_raw
+  camera:
+    name: cam_astrobee
+    width: 640
+    height: 480
+    horizontal_fov_deg: 70.0
+    horizontal_aperture_mm: 20.955
+    clipping_range_m: [0.1, 1000.0]
+    # NASA `sci_cam_transform` (body frame: +X forward, +Z down), scaled with the model
+    mount_pos_body_m: [0.118, 0.0, -0.096]
+    publish_rate_hz: 5.0
+    # PNG frame every N s under logs/vision_capture/<tag>_astrobee/ (0 = off)
+    save_every_s: 0.0

@@ -21,6 +21,9 @@ Must run with the Isaac Sim Python (the same interpreter `srb` uses):
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --no_moving_dock
     # ... the same run without the rendezvous phase (the arm starts at the observation pose)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic --dock --no_mrv_approach
+    # Astrobee observation camera (on by default): flies around the satellite, image on
+    # /astrobee/camera/image_raw (with ROS 2); --no_astrobee leaves it out
+    ~/isaac-sim/python.sh project/scripts/vision_capture.py --no_astrobee
     # GUI (debug draw + camera overlay images); after a success the simulation keeps
     # running with the MEP held until the window is closed (--exit_when_done to quit)
     ~/isaac-sim/python.sh project/scripts/vision_capture.py --scenario dynamic
@@ -68,6 +71,9 @@ def parse_args():
                         help="Force the MRV rendezvous phase on even if `mrv.enabled` is false in the config")
     parser.add_argument("--start_yaw_deg", type=float, default=None, metavar="DEG",
                         help="Start the arm swung DEG degrees in azimuth (about its base axis) so it has to search for the MEP")
+    parser.add_argument("--no_astrobee", action="store_true",
+                        help="Leave out the Astrobee observation camera (default: on, config `astrobee:`; its image is "
+                             "published on /astrobee/camera/image_raw when ROS 2 is on)")
     parser.add_argument("--no_ros", action="store_true", help="Disable the ROS 2 interface (default: on)")
     parser.add_argument("--ros", action="store_true",
                         help="Enable the ROS 2 interface (default: on) (telemetry topics + cmd/start, cmd/abort, cmd/capture_enable; see config `ros:`)")
@@ -172,6 +178,8 @@ def main():
         # The docking-only path attaches the MEP at its nominal grasp pose in `start()`,
         # so there is no capture to approach and the rendezvous phase has no purpose
         sets.append("mrv.enabled=false")
+    if args.no_astrobee:
+        sets.append("astrobee.enabled=false")
     if args.no_ros:
         sets.append("ros.enabled=false")
     elif args.ros or args.ros_wait_start:
@@ -227,6 +235,7 @@ def main():
         # failed (the exit code below still carries every check)
         if not args.headless and results.final_state == "SUCCESS" and not args.exit_when_done:
             demo.idle()  # results are already written; keep the scene up until the window closes
+        demo.close_astrobee()
         env.close()
 
     run()

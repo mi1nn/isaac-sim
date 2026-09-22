@@ -22,18 +22,22 @@ from typing import Optional, Tuple
 import numpy as np
 from pxr import Gf, Usd, UsdGeom
 
+from srb.core.asset import AssetBaseCfg
 from srb.core.sensor import CameraCfg, PinholeCameraCfg
+from srb.core.sim import UsdFileCfg
 from srb.utils.cfg import configclass
+from srb.utils.path import SRB_ASSETS_DIR_SPACE
 
 from .docking import DockingTask, DockingTaskCfg, prim_frame, prim_scale, set_prim_pose
 from .frames import Frame, frame_from_axes
 from .vision import (
-    CAM_MOUNT_QUAT_ROS,
+    camera_in_link,
     DEFAULT_CONFIG_PATH,
     VisionCaptureConfig,
     check_constellation_layout,
     load_vision_config,
     rendezvous_start_pose,
+    rot_z,
     spawn_tag_constellation,
 )
 
@@ -109,6 +113,46 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
                     ),
                 ),
             )
+        # Astrobee observation camera platform (`astrobee.py`): a visual-only model (no
+        # rigid body, no collider) and a free camera, both posed kinematically by
+        # `AstrobeeObserver` every step. Spawned far away; the first step places them.
+        ab = v.astrobee
+        if ab.enabled:
+            setattr(
+                self.scene,
+                ab.prim_name,
+                AssetBaseCfg(
+                    prim_path=f"{{ENV_REGEX_NS}}/{ab.prim_name}",
+                    spawn=UsdFileCfg(
+                        usd_path=SRB_ASSETS_DIR_SPACE.joinpath(ab.usd_relpath).as_posix(),
+                        scale=(ab.scale, ab.scale, ab.scale),
+                    ),
+                    init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -500.0)),
+                ),
+            )
+            ac = ab.camera
+            setattr(
+                self.scene,
+                ac.name,
+                CameraCfg(
+                    prim_path=f"{{ENV_REGEX_NS}}/{ac.name}",
+                    offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, -500.0), rot=(1.0, 0.0, 0.0, 0.0), convention="world"),
+                    update_period=0.0,
+                    width=int(ac.width),
+                    height=int(ac.height),
+                    data_types=["rgb"],
+                    spawn=PinholeCameraCfg(
+                        focal_length=ac.focal_length_mm,
+                        horizontal_aperture=ac.horizontal_aperture_mm,
+                        clipping_range=tuple(ac.clipping_range_m),
+                    ),
+                ),
+            )
+        else:
+            # `apply_vision_config` runs again after overrides: drop an earlier spawn request
+            for name in (ab.prim_name, ab.camera.name):
+                if getattr(self.scene, name, None) is not None:
+                    setattr(self.scene, name, None)
         c = v.camera
         # Global RTX anti-aliasing (the default DLSS renders at a lower resolution and
         # upsamples, which moves tag edges by sub-pixels from frame to frame)
@@ -119,7 +163,7 @@ class VisionCaptureTaskCfg(DockingTaskCfg):
             c.name,
             CameraCfg(
                 prim_path=f"{self._robot.asset_cfg.prim_path}/{link}/{c.name}",
-                offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, c.mount_link_z_m), rot=CAM_MOUNT_QUAT_ROS, convention="ros"),
+                offset=CameraCfg.OffsetCfg(pos=(0.0, 0.0, c.mount_link_z_m), rot=tuple(float(q) for q in camera_in_link(c).quat), convention="ros"),
                 update_period=0.0,
                 width=int(c.width) * int(c.supersample),
                 height=int(c.height) * int(c.supersample),
@@ -215,6 +259,10 @@ class VisionCaptureTask(DockingTask):
             cam = frame_from_axes(
                 geo.probe_dock.pos + pc.offset_from_tip_m * axis, -axis, geo.probe_dock.rot[:, 0]
             )
+            # `image_roll_deg` about the viewing direction (clockwise seen from behind the
+            # camera). The prim frame is the USD camera frame (view = -Z), so a clockwise
+            # roll about the view is a rotation of -roll about the prim's own +Z
+            cam = Frame(cam.pos, cam.rot @ rot_z(-pc.image_roll_deg))
             self.probe_cam_in_mep = cam
             # The translucent dock indicator is a full disc across the nozzle exit, and a
             # depth image records the first hit whatever its opacity, so it would be the
