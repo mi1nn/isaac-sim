@@ -230,9 +230,9 @@ def test_dock_ready_without_depth_when_depth_is_not_required(cfg, dock):
 
 def test_docking_config_defaults_and_overrides():
     c = load_vision_config()
-    assert c.docking.enabled is False and c.docking.require_depth is True
-    c = load_vision_config(overrides=["docking.enabled=true", "docking.pre_dock_distance_m=1.5"])
-    assert c.docking.enabled and c.docking.pre_dock_distance_m == 1.5
+    assert c.docking.enabled is True and c.docking.require_depth is True
+    c = load_vision_config(overrides=["docking.enabled=false", "docking.pre_dock_distance_m=1.5"])
+    assert not c.docking.enabled and c.docking.pre_dock_distance_m == 1.5
     # the drift direction is normalised at load time, like mep.drift_direction
     c = load_vision_config(overrides=["docking.satellite_velocity_mps=0.004",
                                       "docking.satellite_drift_direction=[0.0, 2.0, 0.0]"])

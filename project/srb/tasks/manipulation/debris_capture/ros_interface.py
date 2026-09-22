@@ -4,6 +4,9 @@ Telemetry out (all topics under /<namespace>/, world frame `ros.world_frame`):
 
     cam_wrist/image_raw          sensor_msgs/Image        rgb8, the image the vision system uses
     cam_wrist/camera_info        sensor_msgs/CameraInfo   intrinsics of that image (no distortion)
+    viewport/image_raw           sensor_msgs/Image        rgb8, main interactive viewport (API capture, GUI only,
+                                                           not a screen share -- see `capture_viewport_to_buffer`
+                                                           in `vision_capture_demo.py`)
     estimate/cylinder_pose       geometry_msgs/PoseStamped  filtered Cylinder_01 (vision only)
     predicted/cylinder_pose      geometry_msgs/PoseStamped  Cylinder_01 at t + prediction.horizon_sec
     estimate/mep_twist           geometry_msgs/TwistStamped estimated MEP twist (world)
@@ -67,7 +70,7 @@ class VisionRosInterface:
         rclpy = self.rclpy = _import_rclpy(cfg.distro)
         from geometry_msgs.msg import PoseStamped, TransformStamped, TwistStamped
         from rclpy.executors import SingleThreadedExecutor
-        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
         from sensor_msgs.msg import CameraInfo, Image
         from std_msgs.msg import Bool, Empty, String
         from tf2_msgs.msg import TFMessage
@@ -86,11 +89,17 @@ class VisionRosInterface:
         reliable = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         sensor = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
+        viewport_sensor = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
         create = self.node.create_publisher
         self.pub: Dict[str, object] = {
             "image": create(Image, "cam_wrist/image_raw", sensor),
             "info": create(CameraInfo, "cam_wrist/camera_info", sensor),
             "probe_image": create(Image, "cam_probe/image_raw", sensor),
+            "viewport_image": create(Image, "viewport/image_raw", viewport_sensor),
             "est": create(PoseStamped, "estimate/cylinder_pose", reliable),
             "pred": create(PoseStamped, "predicted/cylinder_pose", reliable),
             "twist": create(TwistStamped, "estimate/mep_twist", reliable),
@@ -259,6 +268,29 @@ class VisionRosInterface:
         m.data = img.tobytes()
 
         self.pub["probe_image"].publish(m)
+
+    def publish_viewport_image(self, t: float, image: np.ndarray):
+        """RGB frame of the main interactive viewport (API capture: only the
+        RTX render buffer, no OS window chrome / Isaac Sim UI panels)."""
+        img = np.ascontiguousarray(image, dtype=np.uint8)
+
+        if img.ndim != 3 or img.shape[2] < 3:
+            return
+
+        img = img[..., :3]
+
+        m = self._msgs["Image"]()
+        m.header.stamp = self._stamp(t)
+        m.header.frame_id = f"{self.ns}/viewport"
+
+        m.height = int(img.shape[0])
+        m.width = int(img.shape[1])
+        m.encoding = "rgb8"
+        m.is_bigendian = 0
+        m.step = int(img.shape[1]) * 3
+        m.data = img.tobytes()
+
+        self.pub["viewport_image"].publish(m)
 
     def publish_state(self, t: float, state: str, captured: bool, status: dict):
         """State machine (latched, on change) and the JSON status."""

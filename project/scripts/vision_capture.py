@@ -98,13 +98,22 @@ def ensure_ros2_env(args):
         return
     isaac_path = os.environ.get("ISAAC_PATH", os.path.expanduser("~/isaac-sim"))
     distro = os.environ.get("ROS_DISTRO") or "jazzy"
-    lib = os.path.join(isaac_path, "exts", "isaacsim.ros2.bridge", distro, "lib")
-    if not os.path.isdir(lib):
-        sys.exit(f"[ROS] bridge libraries not found: {lib} (set ROS_DISTRO to humble / jazzy)")
-    paths = [x for x in os.environ.get("LD_LIBRARY_PATH", "").split(":") if x]
-    if lib not in paths:
-        paths.append(lib)
-    os.environ["LD_LIBRARY_PATH"] = ":".join(paths)
+    bridge = os.path.join(isaac_path, "exts", "isaacsim.ros2.bridge", distro)
+    lib, py = os.path.join(bridge, "lib"), os.path.join(bridge, "rclpy")
+    if not os.path.isdir(lib) or not os.path.isdir(py):
+        sys.exit(f"[ROS] bridge libraries not found: {bridge} (set ROS_DISTRO to humble / jazzy)")
+
+    # A sourced /opt/ros (Python 3.12) or a separately built rclpy overlay must not mix with the
+    # bridge's Python 3.11 rclpy + generated messages (rcl_interfaces ParameterEvent assertion):
+    # use the bridge exclusively, first on both search paths.
+    def external_ros(p):
+        return p.startswith("/opt/ros/") or "ros_jazzy_py311" in p or "python3.12" in p
+
+    for var, first in (("LD_LIBRARY_PATH", lib), ("PYTHONPATH", py), ("AMENT_PREFIX_PATH", None)):
+        paths = [x for x in os.environ.get(var, "").split(":") if x and x != first and not external_ros(x)]
+        os.environ[var] = ":".join(([first] if first else []) + paths)
+        if not os.environ[var]:
+            del os.environ[var]
     os.environ["ROS_DISTRO"] = distro
     os.environ.setdefault("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
     os.environ["MRV_ROS_ENV_READY"] = "1"
