@@ -1,41 +1,26 @@
-<h1 align="center">Space Robotics Bench</h1>
+## 14. `feature/linear-movement`
 
-<p align="center">
-  <a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="" src="https://github.com/user-attachments/assets/049289be-0c99-497b-be37-c4975d924524" width="100%"></a>
-</p>
+### 이슈와 수정
 
-[![Discord](https://img.shields.io/badge/Discord-invite-5865F2?logo=discord)](https://discord.gg/p9gZAPWa65)
-[![Docs](https://img.shields.io/badge/docs-online-blue?logo=markdown)](https://AndrejOrsula.github.io/space_robotics_bench)
-[![Rust](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml)
-[![Python](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml)
-[![Docker](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml)
-[![Docs](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml)
+- MEP 캡처 이후 MRV가 정지한 채 다음 단계로 넘어가 실제 평행 이동 임무가 반영되지 않았다.
+- MRV 평행 이동을 파이프라인에 연결하고 mission dashboard UI를 추가했다.
+- 커밋 기록상 MRV 평행 이동 후 파이프라인을 통과했다.
 
-<!-- [![Codecov](https://codecov.io/gh/AndrejOrsula/space_robotics_bench/graph/badge.svg)](https://codecov.io/gh/AndrejOrsula/space_robotics_bench) -->
+### 실행 명령
 
-**Space Robotics Bench (SRB)** is a comprehensive collection of environments and tasks for robotics research in the challenging domain of space. It provides a unified framework for developing and validating autonomous systems under diverse extraterrestrial scenarios. At the same time, its design is flexible and extensible to accommodate a variety of development workflows and research directions beyond Earth.
+```bash
+git switch feature/linear-movement
+~/isaac-sim/python.sh project/scripts/vision_capture.py \
+  --scenario dynamic --tag linear --dock
 
-## Key Features
+cd mep_dashboard
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+```
 
-- **Parallelized Simulation**: Highly parallelized simulation instances for accelerated workflows
-- **Procedural Generation**: On-demand generation of diverse simulation assets and scenes
-- **Domain Randomization**: Extensive randomization for robustness and generalization
-- **Gymnasium API**: Compatibility with standard API and frameworks for robot learning
-- **ROS 2 Interface**: Seamless interoperability with ROS 2 and Space ROS ecosystems
-- **Abstract Architecture**: Flexibility across different robots and space domains
+### 결과
 
-## Documentation
-
-SRB documentation with detailed installation instructions, usage guides, and development resources is available [online](https://AndrejOrsula.github.io/space_robotics_bench).
-
-<div align="right">
-<a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="Documentation" src="https://github.com/user-attachments/assets/c8663796-3ef1-4ff7-860b-cf8080d0a07a" width="96" height="96"></a>
-</div>
-
-## License
-
-This project is dual-licensed under either the [MIT](project/LICENSE-MIT) or [Apache 2.0](project/LICENSE-APACHE) licenses.
-
-All assets created by contributors of this repository and those generated from [SimForge](https://github.com/AndrejOrsula/simforge) procedural pipelines are licensed under the [CC0 1.0 Universal](https://github.com/AndrejOrsula/srb_assets/blob/main/LICENSE-CC0) license. Resources from third-party sources are listed under [attributions](https://andrejorsula.github.io/space_robotics_bench/misc/attributions.html).
-
-[![CC0 1.0 Universal](https://licensebuttons.net/l/zero/1.0/88x31.png)](https://creativecommons.org/publicdomain/zero/1.0)
+- 현재: 컴파일 통과, Isaac Sim 환경 50개 등록.
+- 과거 기록: MRV 평행 이동 후 파이프라인 통과.
+- 제한: dashboard와 simulator를 동시에 연결하는 통합 실행은 현재 재검증하지 않았다.
