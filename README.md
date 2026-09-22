@@ -12,9 +12,7 @@
 
 ```bash
 git switch feature/integration
-~/isaac-sim/python.sh project/scripts/vision_capture.py \
-  --scenario dynamic --tag full_6dof --dock \
-  --set mep.motion_mode=six_dof
+~/isaac-sim/python.sh project/scripts/vision_capture.py
 ```
 
 Astrobee smoke:
@@ -24,7 +22,7 @@ Astrobee smoke:
 cd project
 ~/isaac-sim/python.sh -m pytest tests/test_astrobee_observer.py -q
 
-ROS_DOMAIN_ID=77 ~/isaac-sim/python.sh scripts/vision_capture.py \
+ROS_DOMAIN_ID=143 ~/isaac-sim/python.sh scripts/vision_capture.py \
   --headless --dock_only --tag astrobee_smoke \
   --set "astrobee.camera={save_every_s: 5.0}"
 ```
