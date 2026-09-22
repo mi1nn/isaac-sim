@@ -1,41 +1,37 @@
-<h1 align="center">Space Robotics Bench</h1>
+## 18. `feature/integration`
 
-<p align="center">
-  <a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="" src="https://github.com/user-attachments/assets/049289be-0c99-497b-be37-c4975d924524" width="100%"></a>
-</p>
+### 이슈와 수정
 
-[![Discord](https://img.shields.io/badge/Discord-invite-5865F2?logo=discord)](https://discord.gg/p9gZAPWa65)
-[![Docs](https://img.shields.io/badge/docs-online-blue?logo=markdown)](https://AndrejOrsula.github.io/space_robotics_bench)
-[![Rust](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/rust.yml)
-[![Python](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/python.yml)
-[![Docker](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docker.yml)
-[![Docs](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml/badge.svg)](https://github.com/AndrejOrsula/space_robotics_bench/actions/workflows/docs.yml)
+- 캡처, MRV 이동, Satellite 도킹, gripper release/retreat, DB 저장, MEP 이동·회전이 분산돼 있었다.
+- 위 단계를 하나의 파이프라인으로 통합하고 docking hold를 제거했다.
+- Astrobee 자산/observer와 probe camera 각도 조정을 추가했다.
 
-<!-- [![Codecov](https://codecov.io/gh/AndrejOrsula/space_robotics_bench/graph/badge.svg)](https://codecov.io/gh/AndrejOrsula/space_robotics_bench) -->
+### 실행 명령
 
-**Space Robotics Bench (SRB)** is a comprehensive collection of environments and tasks for robotics research in the challenging domain of space. It provides a unified framework for developing and validating autonomous systems under diverse extraterrestrial scenarios. At the same time, its design is flexible and extensible to accommodate a variety of development workflows and research directions beyond Earth.
+전체 임무:
 
-## Key Features
+```bash
+git switch feature/integration
+~/isaac-sim/python.sh project/scripts/vision_capture.py \
+  --scenario dynamic --tag full_6dof --dock \
+  --set mep.motion_mode=six_dof
+```
 
-- **Parallelized Simulation**: Highly parallelized simulation instances for accelerated workflows
-- **Procedural Generation**: On-demand generation of diverse simulation assets and scenes
-- **Domain Randomization**: Extensive randomization for robustness and generalization
-- **Gymnasium API**: Compatibility with standard API and frameworks for robot learning
-- **ROS 2 Interface**: Seamless interoperability with ROS 2 and Space ROS ecosystems
-- **Abstract Architecture**: Flexibility across different robots and space domains
+Astrobee smoke:
 
-## Documentation
+```bash
+~/isaac-sim/python.sh project/scripts/build_astrobee_usd.py
+cd project
+~/isaac-sim/python.sh -m pytest tests/test_astrobee_observer.py -q
 
-SRB documentation with detailed installation instructions, usage guides, and development resources is available [online](https://AndrejOrsula.github.io/space_robotics_bench).
+ROS_DOMAIN_ID=77 ~/isaac-sim/python.sh scripts/vision_capture.py \
+  --headless --dock_only --tag astrobee_smoke \
+  --set "astrobee.camera={save_every_s: 5.0}"
+```
 
-<div align="right">
-<a href="https://AndrejOrsula.github.io/space_robotics_bench"><img alt="Documentation" src="https://github.com/user-attachments/assets/c8663796-3ef1-4ff7-860b-cf8080d0a07a" width="96" height="96"></a>
-</div>
+### 결과
 
-## License
-
-This project is dual-licensed under either the [MIT](project/LICENSE-MIT) or [Apache 2.0](project/LICENSE-APACHE) licenses.
-
-All assets created by contributors of this repository and those generated from [SimForge](https://github.com/AndrejOrsula/simforge) procedural pipelines are licensed under the [CC0 1.0 Universal](https://github.com/AndrejOrsula/srb_assets/blob/main/LICENSE-CC0) license. Resources from third-party sources are listed under [attributions](https://andrejorsula.github.io/space_robotics_bench/misc/attributions.html).
-
-[![CC0 1.0 Universal](https://licensebuttons.net/l/zero/1.0/88x31.png)](https://creativecommons.org/publicdomain/zero/1.0)
+- 현재: 컴파일 통과, Isaac Sim 환경 50개 등록.
+- 과거 기록: 파이프라인 테스트 완료, MRV 접근→MEP 부착→도킹→release/retreat→DB 단계 통합.
+- 제외 범위: 현재 작업 디렉터리의 커밋되지 않은 Astrobee/docking 수정은 이 브랜치 설명에 포함하지 않았다.
+- 제한: 현재 tip의 전체 6-DoF 물리 실행은 이번 조사에서 재실행하지 않았다.
