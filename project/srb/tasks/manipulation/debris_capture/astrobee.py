@@ -577,7 +577,7 @@ class AstrobeeObserver:
             return
         rgb = self.camera.data.output["rgb"][0].cpu().numpy()[..., :3]
         if publish_due:
-            self._next_pub_t = t + 1.0 / c.publish_rate_hz - 1e-9
+            self._next_pub_t = t + 1.0 / min(float(c.publish_rate_hz), 5.0) - 1e-9
             self.ros.publish(t, rgb)
             self.frames += 1
         if save_due:

@@ -178,6 +178,102 @@ class FirestoreSink:
 ########################
 
 
+class VideoRecorder:
+    """Session video of `/<ns>/viewport/image_raw` for the web dashboard's range playback.
+
+    H.264 (browser playable) at a constant `fps` of *simulation* time: video time 0 is the
+    session start `t0` (sim time), so a telemetry sim time `t` is video time `t - t0`. Gaps
+    between viewport frames repeat the previous frame. Written to `<out_dir>/<session_id>.mp4`
+    (renamed from `.part` when complete) with `<session_id>.video.json` = {t0_sim_s, fps, ...}.
+    Encoding runs on its own thread so the ROS callbacks never wait for ffmpeg.
+    """
+
+    def __init__(self, out_dir: str, fps: float = 10.0, max_width: int = 1280):
+        self.out_dir = out_dir
+        self.fps = float(fps)
+        self.max_width = int(max_width)
+        self.session_id: Optional[str] = None
+        self._queue: "queue.Queue" = queue.Queue(maxsize=64)
+        self._thread: Optional[threading.Thread] = None
+
+    def open(self, session_id: str, t0: float):
+        self.close()
+        os.makedirs(self.out_dir, exist_ok=True)
+        self.session_id, self.t0 = session_id, float(t0)
+        self._queue = queue.Queue(maxsize=64)
+        self._thread = threading.Thread(target=self._run, args=(session_id, self.t0, self._queue), daemon=True)
+        self._thread.start()
+
+    def frame(self, t: float, rgb):
+        if self.session_id is None or t < self.t0:
+            return
+        try:
+            self._queue.put_nowait((t, rgb))
+        except queue.Full:
+            pass  # the encoder is behind: drop this frame, the previous one fills the gap
+
+    def close(self):
+        if self._thread is None:
+            return
+        self._queue.put(None)
+        self._thread.join(timeout=120.0)
+        self._thread, self.session_id = None, None
+
+    def _run(self, session_id: str, t0: float, q: "queue.Queue"):
+        import subprocess
+
+        import numpy as np
+
+        base = os.path.join(self.out_dir, session_id)
+        part = base + ".mp4.part"
+        proc, size, last, written = None, None, None, 0
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            t, rgb = item
+            if proc is None:
+                h, w = rgb.shape[:2]
+                size = (w, h)
+                scale = [] if w <= self.max_width else ["-vf", f"scale={self.max_width}:-2"]
+                proc = subprocess.Popen(
+                    ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", f"{self.fps:g}", "-i", "-",
+                     *scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
+                     "-movflags", "+faststart", "-f", "mp4", part],
+                    stdin=subprocess.PIPE)
+            if (rgb.shape[1], rgb.shape[0]) != size:
+                continue
+            # Frame index of this sim time; fill up to it with the previous frame (or this one at the start)
+            target = int(round((t - t0) * self.fps))
+            fill = last if last is not None else rgb
+            try:
+                while written < target:
+                    proc.stdin.write(fill.tobytes())
+                    written += 1
+                if written == target:
+                    proc.stdin.write(np.ascontiguousarray(rgb).tobytes())
+                    written += 1
+            except (BrokenPipeError, OSError) as exc:
+                print(f"[VIDEO] ffmpeg stopped: {exc}", flush=True)
+                break
+            last = rgb
+        if proc is None:
+            return
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        if proc.wait() == 0 and written:
+            os.replace(part, base + ".mp4")
+            with open(base + ".video.json", "w") as f:
+                json.dump({"session_id": session_id, "t0_sim_s": t0, "fps": self.fps, "frames": written,
+                           "duration_s": written / self.fps, "source": "viewport/image_raw"}, f, indent=2)
+            print(f"[VIDEO] {base}.mp4: {written} frames, {written / self.fps:.1f} s from sim t={t0:.2f} s", flush=True)
+        else:
+            print(f"[VIDEO] encoding failed for session {session_id}", flush=True)
+
+
 class SessionRecorder:
     """Turns the ROS messages into rows. No ROS / Firebase imports: unit-testable with plain dicts.
 
@@ -186,8 +282,10 @@ class SessionRecorder:
     state (SUCCESS / failure) or `finish()`; the KPIs are written to the summary once.
     """
 
-    def __init__(self, sink, rate_hz: float = 5.0, session_id: Optional[str] = None, idle_timeout_s: float = 30.0):
+    def __init__(self, sink, rate_hz: float = 5.0, session_id: Optional[str] = None, idle_timeout_s: float = 30.0,
+                 video: Optional[VideoRecorder] = None):
         self.sink = sink
+        self.video = video
         self.period = 1.0 / max(rate_hz, 1e-6)
         self.fixed_id = session_id
         self.idle_timeout_s = idle_timeout_s
@@ -229,6 +327,10 @@ class SessionRecorder:
     def on_captured(self, captured: bool):
         self.captured = bool(captured)
 
+    def on_viewport(self, t: float, rgb):
+        if self.video is not None and self.session_id is not None:
+            self.video.frame(t, rgb)
+
     def on_status(self, s: Dict[str, Any]):
         self.last_msg_wall = time.time()
         state = s.get("state") or self.state
@@ -242,14 +344,46 @@ class SessionRecorder:
         if self.session_id is None:
             if terminal:
                 return  # leftover of the previous run
+
+            # Isaac publishes status while waiting for the real mission start.
+            # Do not create a Firestore run until /mrv/cmd/start has actually
+            # been received by the simulator.
+            if not bool(s.get("start_received")):
+                self.last_status = {
+                    **s,
+                    "sim_time_s": t,
+                    "state": state,
+                }
+                return
+
             self._start()
+            if self.video is not None:
+                self.video.open(self.session_id, t)
         if "captured" in s:
             self.captured = bool(s["captured"])
         # Compare with the previous /status, not with /captured (that topic arrives first)
         if self.captured and not self._status_captured:
-            self.contact_vel = _num(s.get("est_rel_vel"))  # impact speed at the moment of contact
+            self.contact_vel = _num(s.get("est_rel_vel"))  # legacy estimated impact speed
             self.capture_time = t
-            self.capture_metrics = {k: _num(s.get(f"est_{k}")) for k in ("distance", "lateral", "orientation", "rel_vel")}
+
+            # Legacy capture metrics are preserved for backward compatibility.
+            self.capture_metrics = {
+                k: _num(s.get(f"est_{k}"))
+                for k in ("distance", "lateral", "orientation", "rel_vel")
+            }
+
+            # Ground-truth evaluation metrics.
+            # These are monitoring / validation values only.
+            self.capture_gt_metrics = {
+                "position_error": _num(s.get("gt_capture_position_error_m")),
+                "gap": _num(s.get("gt_capture_gap_m")),
+                "lateral": _num(s.get("gt_capture_lateral_error_m")),
+                "orientation": _num(s.get("gt_capture_orientation_error_deg")),
+                "rel_vel": _num(s.get("gt_relative_velocity_mps")),
+                "rel_ang_vel": _num(s.get("gt_relative_angular_velocity_rad_s")),
+                "remaining_distance": _num(s.get("gt_capture_remaining_distance_m")),
+                "target_gap": _num(s.get("capture_target_gap_m")),
+            }
         self._status_captured = self.captured
         self._track_docking(t, s)
         self.last_status = {**s, "sim_time_s": t, "state": state}
@@ -297,6 +431,17 @@ class SessionRecorder:
             "final_distance_m": None, "final_angle_deg": None, "contact_vel_mps": None,
             "capture_position_error_m": None, "capture_lateral_error_m": None, "capture_orientation_error_deg": None,
             "capture_contact_velocity_mps": None, "capture_time_s": None,
+
+            # GT target-pose capture evaluation (new metric set).
+            "capture_gt_position_error_m": None,
+            "capture_gt_gap_m": None,
+            "capture_gt_lateral_error_m": None,
+            "capture_gt_orientation_error_deg": None,
+            "capture_gt_relative_velocity_mps": None,
+            "capture_gt_relative_angular_velocity_rad_s": None,
+            "capture_gt_remaining_distance_m": None,
+            "capture_target_gap_m": None,
+            "capture_metric_version": None,
             "docking_position_error_m": None, "docking_lateral_error_m": None, "docking_orientation_error_deg": None,
             "docking_insertion_depth_m": None, "docking_relative_velocity_mps": None, "docking_time_s": None,
         })
@@ -305,7 +450,7 @@ class SessionRecorder:
     def _reset_latest_keep_clock(self):
         self.seq, self.last_row_t, self.contact_vel, self._status_captured, self.docked = 0, -math.inf, None, False, False
         self.dock_enabled = self.docking_started = self.docking_success = False
-        self.capture_metrics, self.capture_time, self.dock_t0, self.dock_t_end = {}, None, None, None
+        self.capture_metrics, self.capture_gt_metrics, self.capture_time, self.dock_t0, self.dock_t_end = {}, {}, None, None, None
         self.last_docking_metrics = dict.fromkeys(self.last_docking_metrics)
 
     def _write_row(self, t: float, state: Optional[str], s: Dict[str, Any]):
@@ -368,7 +513,7 @@ class SessionRecorder:
         docking_success = bool(self.docking_success)
         # A capture-only run (no `--dock`) has no docking to fail: docking_success stays null, mission = capture
         mission_success = capture_success and (docking_success if self.dock_enabled else True)
-        cm, dm = self.capture_metrics, self.last_docking_metrics
+        cm, gm, dm = self.capture_metrics, self.capture_gt_metrics, self.last_docking_metrics
         dock_xyz = [dm.get(k) for k in ("relative_x", "relative_y", "relative_z")]
         dock_pos = math.sqrt(sum(v * v for v in dock_xyz)) if all(v is not None for v in dock_xyz) else None
         dock_end = self.dock_t_end if self.dock_t_end is not None else _num(s.get("sim_time_s"))
@@ -385,6 +530,22 @@ class SessionRecorder:
             "capture_orientation_error_deg": cm.get("orientation"),
             "capture_contact_velocity_mps": self.contact_vel,
             "capture_time_s": self.capture_time,
+
+            # GT target-pose capture evaluation.
+            "capture_gt_position_error_m": gm.get("position_error"),
+            "capture_gt_gap_m": gm.get("gap"),
+            "capture_gt_lateral_error_m": gm.get("lateral"),
+            "capture_gt_orientation_error_deg": gm.get("orientation"),
+            "capture_gt_relative_velocity_mps": gm.get("rel_vel"),
+            "capture_gt_relative_angular_velocity_rad_s": gm.get("rel_ang_vel"),
+            "capture_gt_remaining_distance_m": gm.get("remaining_distance"),
+            "capture_target_gap_m": gm.get("target_gap"),
+            "capture_metric_version": (
+                "gt_target_v1"
+                if gm.get("position_error") is not None
+                else None
+            ),
+
             "docking_position_error_m": dock_pos,
             "docking_lateral_error_m": dm.get("lateral_error"),
             "docking_orientation_error_deg": dm.get("orientation_error"),
@@ -400,6 +561,8 @@ class SessionRecorder:
         self.sink.flush()
         print(f"[DB] session {self.session_id} finished: capture={capture_success} docking={docking_success} mission={mission_success} failure={failure}", flush=True)
         self.session_id = None
+        if self.video is not None:
+            self.video.close()
 
     def check_idle(self):
         """The simulator died without a terminal state: close the session after `idle_timeout_s`."""
@@ -418,7 +581,10 @@ def run_ros(rec: SessionRecorder, ns: str):
     from geometry_msgs.msg import PoseStamped
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+    from sensor_msgs.msg import Image
     from std_msgs.msg import Bool, String
+
+    import numpy as np
 
     reliable = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
     latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -455,6 +621,21 @@ def run_ros(rec: SessionRecorder, ns: str):
     node.create_subscription(String, f"/{ns}/state", state_cb, latched)
     node.create_subscription(Bool, f"/{ns}/captured", captured_cb, latched)
     node.create_subscription(String, f"/{ns}/status", status_cb, reliable)
+
+    def viewport_cb(m):
+        if m.encoding not in ("rgb8", "bgr8") or m.height <= 0 or m.width <= 0:
+            return
+        rows = np.frombuffer(m.data, dtype=np.uint8)[: m.height * m.step].reshape(m.height, m.step)
+        rgb = rows[:, : m.width * 3].reshape(m.height, m.width, 3)
+        if m.encoding == "bgr8":
+            rgb = rgb[..., ::-1]
+        t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9  # sim time, same clock as /status sim_time_s
+        with lock:
+            rec.on_viewport(t, rgb.copy())
+
+    if rec.video is not None:
+        node.create_subscription(Image, f"/{ns}/viewport/image_raw", viewport_cb,
+                                 QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT))
     print(f"[DB] listening on /{ns}/ ...", flush=True)
 
     stop = threading.Event()
@@ -483,10 +664,15 @@ def main():
     ap.add_argument("--session_id", default=None, help="id of the first session (default: run_YYYYMMDD_HHMMSS)")
     ap.add_argument("--idle_timeout", type=float, default=30.0, help="close a session after this many wall seconds without /status")
     ap.add_argument("--dry_run", action="store_true", help="print the writes instead of sending them")
+    ap.add_argument("--video_dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "vision_capture"),
+                    help="session videos <session_id>.mp4 (viewport, sim-time aligned) for the web dashboard")
+    ap.add_argument("--video_fps", type=float, default=10.0, help="session video frames per second of simulation time")
+    ap.add_argument("--no_video", action="store_true", help="do not record the session video")
     args = ap.parse_args()
 
     sink = StdoutSink() if args.dry_run else FirestoreSink(args.credentials, args.project_id)
-    rec = SessionRecorder(sink, args.rate_hz, args.session_id, args.idle_timeout)
+    video = None if args.no_video else VideoRecorder(os.path.normpath(args.video_dir), args.video_fps)
+    rec = SessionRecorder(sink, args.rate_hz, args.session_id, args.idle_timeout, video)
     try:
         run_ros(rec, args.namespace.strip("/"))
     finally:
