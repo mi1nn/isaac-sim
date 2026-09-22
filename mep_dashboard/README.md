@@ -18,16 +18,41 @@ python3 -m venv .venv
 8000번 포트를 사용하는 다른 서버가 있으면 `--port 8001`로 변경하고 해당 주소로 접속하세요.
 `venv` 생성 시 ensurepip 오류가 있으면 Ubuntu의 `python3-venv` 패키지를 설치하세요.
 
-필수 Python 패키지: FastAPI 0.141.1, Uvicorn 0.53.0.
+필수 Python 패키지: FastAPI 0.141.1, Uvicorn 0.53.0, Pillow 10.2.0 (CAMERA 3 JPEG 변환).
 Chart.js 4.4.8은 `frontend/js/vendor/chart.umd.js`에 포함되어 실행 시 CDN이나 외부 인터넷이 필요하지 않습니다.
 Playwright 1.63.0은 브라우저 검증용이며 앱 실행에는 필요하지 않습니다.
+
+## CAMERA 3 · Astrobee 관찰 영상 (ROS 2, 실제 영상)
+
+CAMERA 1, 2 오른쪽의 CAMERA 3은 시뮬레이터의 Astrobee 카메라 영상입니다(이 화면에서 유일한 실데이터).
+Astrobee 상태·판정 값은 받지도 표시하지도 않으며, DB에도 기록하지 않습니다.
+
+```text
+GPU PC: Isaac Sim (vision_capture.py) -> /astrobee/camera/image_raw (sensor_msgs/Image rgb8, BEST_EFFORT)
+   │ ROS 2 DDS (같은 ROS_DOMAIN_ID)
+Monitoring PC: backend/astrobee_feed.py (rclpy 구독 -> 최신 1장 JPEG) -> GET /api/camera/astrobee.jpg -> camera3.js (200 ms 폴링)
+```
+
+실행 (rclpy는 ROS 2 설치본을 쓰므로 `--system-site-packages` venv 필요):
+
+```bash
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=<시뮬레이터 PC와 같은 값>
+python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000
+```
+
+- `/api/camera/astrobee.jpg`: 최신 프레임(JPEG), 최근 10초 안에 받은 프레임이 없으면 `204` → 화면은 `STREAM OFFLINE`.
+- 환경 변수: `ASTROBEE_IMAGE_TOPIC`(기본 `/astrobee/camera/image_raw`), `MEP_DASHBOARD_ROS=0`(구독 끔).
+- rclpy가 없으면 서버는 그대로 뜨고 CAMERA 3만 OFFLINE입니다.
 
 ## 화면과 동작
 
 - 상단 LIVE MISSION / TECHNOLOGY VALIDATION 탭: 같은 페이지에서 전환. 방향키/Home/End 지원.
 - LIVE: 큰 Isaac Sim viewport, Mission State, 3/7 progress, Current State, 속도/각속도/거리,
-  로그 스케일 Position Error 차트, 하단 두 카메라 패널.
-- 모든 영상 패널은 STREAM OFFLINE placeholder입니다.
+  로그 스케일 Position Error 차트, 하단 세 카메라 패널.
+- CAMERA 3(Astrobee)을 제외한 영상 패널은 STREAM OFFLINE placeholder입니다.
 - 최초 로드부터 1초 간격으로 mock Position Error가 갱신됩니다. 초기값은 0.018 m입니다.
 - PLAY: mock 시간 및 그래프 재개. STOP: 시간 및 그래프 정지.
 - RESET: 정지 상태로 시간 0, Position Error 0.018 m, 초기 그래프 복원.
@@ -54,13 +79,15 @@ Playwright 1.63.0은 브라우저 검증용이며 앱 실행에는 필요하지 
 ```text
 mep_dashboard/
 ├── backend/
-│   └── app.py
+│   ├── app.py
+│   └── astrobee_feed.py
 ├── frontend/
 │   ├── index.html
 │   ├── css/
 │   │   └── style.css
 │   └── js/
 │       ├── app.js
+│       ├── camera3.js
 │       ├── live.js
 │       ├── validation.js
 │       └── vendor/
@@ -76,7 +103,7 @@ mep_dashboard/
 ```
 
 `.venv/`, `.browsers/`는 이 폴더 내부에 설치된 실행/검증 도구입니다.
-`app.py`는 `/` 화면, `/static` 정적 파일, `/health` mock 상태만 제공합니다.
+`app.py`는 `/` 화면, `/static` 정적 파일, `/health` mock 상태, `/api/camera/astrobee.jpg`(CAMERA 3)를 제공합니다.
 `app.js`는 공통 차트 설정과 탭, `live.js`는 로컬 telemetry,
 `validation.js`는 mock 실행 기록과 통계를 담당합니다.
 
@@ -105,8 +132,8 @@ PLAYWRIGHT_BROWSERS_PATH="$PWD/.browsers" .venv/bin/python checks/browser_check.
 
 ## 이번 단계의 범위
 
-PostgreSQL, ROS2 Subscriber/Publisher, Isaac Sim 연결, WebRTC, 카메라 스트림,
-실제 DB 데이터는 구현하지 않았습니다. 기존 프로젝트 파일은 수정하지 않았습니다.
+PostgreSQL, ROS2 Publisher, Isaac Sim 제어 연결, WebRTC, CAMERA 1/2 스트림,
+실제 DB 데이터는 구현하지 않았습니다. ROS2 Subscriber는 CAMERA 3 영상 하나뿐입니다. 기존 프로젝트 파일은 수정하지 않았습니다.
 
 향후 예정 구조 (현재 미구현):
 `Web UI → FastAPI → ROS2 Command → GPU PC → Isaac Sim`.

@@ -443,6 +443,15 @@ class VisionCaptureDemo:
         self._next_ros_t = 0.0
         self._start_wait_logged = False
         self._capture_wait_logged = False
+        ## Astrobee observation camera (`astrobee.py`): flies and streams its camera only;
+        ## nothing of the mission reads it. Created before the vision ROS node so the
+        ## camera feed (which keeps going in `idle()`) owns the rclpy context.
+        self.astrobee = None
+        if self.cfg.astrobee.enabled:
+            from .astrobee import AstrobeeObserver
+
+            self.astrobee = AstrobeeObserver(t, self.cfg.astrobee, self.cfg.ros.enabled, self.cfg.ros.distro, headless,
+                                             out_dir, self.label)
         if self.cfg.ros.enabled:
             from .ros_interface import VisionRosInterface
 
@@ -1288,12 +1297,25 @@ class VisionCaptureDemo:
                     sim.render()
                     continue
                 self.hold()
+                # Astrobee clock only (`sim_time` stays at the end of the scenario)
+                t_obs = self.sim_time + n * self.dt
+                if self.astrobee is not None:
+                    self.astrobee.step(t_obs)
                 scene.write_data_to_sim()
                 sim.step(render=False)
                 n += 1
                 if n % self.render_interval == 0:
                     sim.render()
                 scene.update(dt=self.dt)
+                if n % self.render_interval == 0 and self.astrobee is not None:
+                    self.astrobee.after_render(t_obs + self.dt)
+
+    def close_astrobee(self):
+        """End of the run (after `idle()` in the GUI): stop the Astrobee camera feed."""
+        if self.astrobee is not None:
+            self.astrobee.complete()
+            self.astrobee.close()
+            self.astrobee = None
 
     def step(self):
         """One control step (called before every physics step)."""
@@ -3015,6 +3037,9 @@ class VisionCaptureDemo:
         try:
             d = self.cfg.docking
             lines = [f"state      {self.state.value}   t = {self.sim_time:6.1f} s"]
+            if self.astrobee is not None:
+                lines.append(f"Astrobee |v| {self.astrobee.speed_mps:6.3f} m/s   "
+                             f"rel. satellite {self.astrobee.rel_speed_mps:6.3f} m/s")
             if self._mv_active and self._mvm:
                 m = self._mvm
                 moved = {k: (float(np.linalg.norm(v[-1] - v[0])) if len(v) > 1 else 0.0) for k, v in self._trail.items()}
@@ -3685,6 +3710,8 @@ class VisionCaptureDemo:
     def run(self) -> Results:
         sim, scene = self.sim, self.scene
         self.open_wrist_view()
+        if self.astrobee is not None:
+            self.astrobee.open_window()
         vision_period = 1.0 / self.cfg.vision.rate_hz
         n = 0
         self.start()
@@ -3723,6 +3750,8 @@ class VisionCaptureDemo:
                     self.moving_after_step()
                 elif self._client_live:
                     self.client_live_step()  # client drifting since t = 0 (MRV still static)
+                if self.astrobee is not None:
+                    self.astrobee.step(self.sim_time)
                 scene.write_data_to_sim()
                 sim.step(render=False)
                 n += 1
@@ -3740,6 +3769,8 @@ class VisionCaptureDemo:
                     if vision_due or not (self.headless and self.cfg.camera.render_on_vision_only):
                         sim.render()
                 scene.update(dt=self.dt)
+                if rendered and self.astrobee is not None:
+                    self.astrobee.after_render(self.sim_time)
                 if vision_due:
                     self._next_vision_t = self.sim_time + vision_period - 1e-9
                     self.process_image()

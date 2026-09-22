@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .astrobee import AstrobeeCfg, validate_astrobee_cfg
 from .frames import Frame, rotation_angle
 from .moving_dock import (
     ClientMotionCfg,
@@ -102,6 +103,9 @@ class CameraVisionCfg:
     horizontal_aperture_mm: float = 20.955
     clipping_range_m: List[float] = field(default_factory=lambda: [0.01, 100.0])
     mount_link_z_m: float = -0.45
+    # Roll of the camera about its viewing axis [deg], right-handed about the optical +Z
+    # (clockwise as seen from behind the camera). 90: image upright (was 0 = rolled 90 deg CCW)
+    image_roll_deg: float = 90.0
     antialiasing: str = "Off"
     # Render at `supersample` x the resolution and area-average down to width x height
     supersample: int = 1
@@ -283,6 +287,9 @@ class VisionCaptureConfig:
     rendezvous: RendezvousCfg = field(default_factory=RendezvousCfg)
     post_docking: PostDockingCfg = field(default_factory=PostDockingCfg)
     separation: SeparationCfg = field(default_factory=SeparationCfg)
+    # Astrobee satellite observation camera (`astrobee.py`): flies around the satellite
+    # and streams its camera image only; independent of (and invisible to) the mission
+    astrobee: AstrobeeCfg = field(default_factory=AstrobeeCfg)
 
     def to_dict(self) -> dict:
         def conv(obj):
@@ -345,6 +352,7 @@ def load_vision_config(path: Optional[str | Path] = None, overrides: Sequence[st
     validate_docking_cfg(cfg.docking)
     validate_probe_camera_cfg(cfg.probe_camera)
     validate_moving_cfg(cfg.client, cfg.rendezvous, cfg.post_docking, cfg.separation)
+    validate_astrobee_cfg(cfg.astrobee)
     if cfg.logging.motion_trail_period_s <= 0.0 or int(cfg.logging.motion_trail_max_points) < 2:
         raise ValueError("logging.motion_trail_period_s must be > 0 and motion_trail_max_points >= 2")
     if cfg.client.release_enabled and not cfg.docking.enabled:
@@ -398,11 +406,20 @@ def pose_errors(gt: Frame, est: Frame) -> Tuple[float, float]:
 # OpenCV/ROS optical frame of `cam_wrist` in the Canadarm3 last link: on the link axis at
 # `mount_link_z_m`, looking along link -Z (the capture direction). A half turn about X
 # gives +X_C = +X_L, +Y_C = -Y_L, +Z_C = -Z_L, i.e. the same axes as the EE contact frame.
+# `camera.image_roll_deg` then rolls the camera about +Z_C (so the image axes are no longer
+# the EE axes; the estimator uses this same transform, so the pose chain is unchanged).
 CAM_MOUNT_QUAT_ROS = (0.0, 1.0, 0.0, 0.0)
 
 
+def rot_z(deg: float) -> np.ndarray:
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
 def camera_in_link(cfg: CameraVisionCfg) -> Frame:
-    return Frame.from_pos_quat((0.0, 0.0, cfg.mount_link_z_m), CAM_MOUNT_QUAT_ROS)
+    """`cam_wrist` optical frame (OpenCV/ROS) in the Canadarm3 last link."""
+    mount = Frame.from_pos_quat((0.0, 0.0, cfg.mount_link_z_m), CAM_MOUNT_QUAT_ROS)
+    return Frame(mount.pos, mount.rot @ rot_z(cfg.image_roll_deg))
 
 
 def downsample(image: np.ndarray, factor: int) -> np.ndarray:
