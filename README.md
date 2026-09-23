@@ -133,7 +133,7 @@ simulation_sessions/{session_id}                         # 실행 요약 (성공
 simulation_sessions/{session_id}/session_telemetry/{id}  # 시계열 (기본 5 Hz, sim_time 기준)
 ```
 
-`session_id` 는 `run_YYYYMMDD_HHMMSS` 형식입니다. 자세한 필드는 `docs/firebase_db.md` 참고.
+`session_id` 는 `run_YYYYMMDD_HHMMSS` 형식입니다. 자세한 필드는 [docs/prompt/firebase_db.md](docs/prompt/firebase_db.md) 참고.
 
 ### 세션 영상
 
@@ -178,7 +178,7 @@ Firestore 에 접근할 수 없으면 캐시본을 내려주고 화면 상단에
 │   ├── backend/app.py            # FastAPI: Firestore API + ROS 2 라이브 + 영상 서빙
 │   ├── frontend/                 # HTML / CSS / Vanilla JS / Chart.js
 │   └── checks/                   # 브라우저·캐시 검증 스크립트
-└── docs/                         # 설계 노트와 단계별 기록
+└── docs/prompt/                  # 설계 노트와 단계별 기록
 ```
 
 `project/srb/` 는 [Space Robotics Bench](https://github.com/AndrejOrsula/space_robotics_bench) 포크입니다.
