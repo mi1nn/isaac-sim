@@ -19,15 +19,31 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 
+# firebase_admin pulls in `cryptography`, which aborts at import time when the
+# OpenSSL 3 legacy provider is unavailable on this host. None of the Firestore
+# code paths need legacy algorithms, so opt out before the import happens.
+os.environ.setdefault("CRYPTOGRAPHY_OPENSSL_NO_LEGACY", "1")
+
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SESSIONS = "simulation_sessions"
 TELEMETRY = "session_telemetry"
+DEFAULT_CREDENTIALS = REPO_ROOT / "serviceAccount.json"
 RUN_VIDEO_ROOT = Path(
     os.environ.get(
         "MRV_RUN_VIDEO_DIR",
-        "/home/rokey/space_robotics_bench/project/logs/vision_capture",
+        REPO_ROOT / "project" / "logs" / "vision_capture",
     )
 ).resolve()
+CACHE_ROOT = Path(
+    os.environ.get(
+        "MEP_DASHBOARD_CACHE_DIR",
+        Path(__file__).resolve().parent.parent / ".cache" / "validation",
+    )
+).resolve()
+# The run list grows while the bridge records, so it is only cached briefly;
+# a finished run's telemetry never changes and is cached until deleted.
+RUNS_CACHE_TTL_S = float(os.environ.get("MEP_DASHBOARD_RUNS_TTL_S", "60"))
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 IMAGE_STALE_TIMEOUT_S = 3.0
 
@@ -57,6 +73,66 @@ def json_value(value: Any):
     return value
 
 
+# ============================================================
+# Validation cache
+# ============================================================
+#
+# Firestore bills per document read: the run list is one read per session and a
+# run's telemetry is one read per row (800-2000). Without a cache every click
+# re-reads the whole run, which exhausts the project's daily read quota
+# (`ResourceExhausted: 429 Quota exceeded`) after a few dozen clicks.
+#
+# A finished run is immutable, so its telemetry is cached on disk and served
+# with zero reads afterwards. A cached copy is also the fallback whenever
+# Firestore is unreachable or out of quota, so the dashboard degrades to stale
+# data instead of an error.
+
+
+def cache_read(name: str):
+    try:
+        with (CACHE_ROOT / name).open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def cache_write(name: str, payload: dict):
+    try:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        partial = CACHE_ROOT / f"{name}.part"
+        with partial.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        partial.replace(CACHE_ROOT / name)
+    except (OSError, ValueError) as exc:
+        print(f"[cache] write failed for {name}: {type(exc).__name__}: {exc}", flush=True)
+
+
+def telemetry_cache_name(session_id: str) -> str:
+    return f"telemetry_{session_id}.json"
+
+
+def session_is_finished(db, session_id: str) -> bool:
+    """A run still being recorded must not be cached as final.
+
+    Answered from the cached run list when possible; only an unknown session
+    costs a single document read.
+    """
+    cached = cache_read("runs.json") or {}
+
+    for run in cached.get("runs", []):
+        if run.get("session_id") == session_id:
+            return not run.get("is_running")
+
+    try:
+        document = db.collection(SESSIONS).document(session_id).get()
+    except Exception as exc:
+        print(f"[cache] run state unknown for {session_id}: {type(exc).__name__}: {exc}", flush=True)
+        return False
+
+    # Runs recorded before `is_running` existed carry no flag and are finished.
+    return not (document.to_dict() or {}).get("is_running")
+
+
 def firestore_client():
     try:
         import firebase_admin
@@ -67,6 +143,11 @@ def firestore_client():
                 os.environ.get("FIREBASE_CREDENTIALS")
                 or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
             )
+
+            # The repo ships the same service account the pipeline writes with,
+            # so the dashboard works without Application Default Credentials.
+            if not credential_path and DEFAULT_CREDENTIALS.is_file():
+                credential_path = str(DEFAULT_CREDENTIALS)
 
             if credential_path:
                 credential = credentials.Certificate(credential_path)
@@ -86,9 +167,12 @@ def firestore_client():
         return firestore.client()
 
     except Exception as exc:
+        # Surface the cause: a swallowed message here looks identical to an
+        # empty database from the browser.
+        print(f"[firestore] client init failed: {type(exc).__name__}: {exc}", flush=True)
         raise HTTPException(
             status_code=503,
-            detail="Firebase Connection Error",
+            detail=f"Firebase Connection Error: {type(exc).__name__}: {exc}",
         ) from exc
 
 
@@ -704,9 +788,13 @@ def health():
 
 @app.get("/api/validation/runs")
 def validation_runs():
-    db = firestore_client()
+    cached = cache_read("runs.json")
+
+    if cached and time.time() - cached.get("cached_at", 0.0) < RUNS_CACHE_TTL_S:
+        return {"runs": cached.get("runs", []), "cache": "fresh"}
 
     try:
+        db = firestore_client()
         runs = []
 
         for document in db.collection(SESSIONS).stream():
@@ -714,13 +802,21 @@ def validation_runs():
             data.setdefault("session_id", document.id)
             runs.append(data)
 
-        return {"runs": runs}
-
     except Exception as exc:
+        reason = exc.detail if isinstance(exc, HTTPException) else f"{type(exc).__name__}: {exc}"
+        print(f"[firestore] run list failed: {reason}", flush=True)
+
+        if cached:
+            print("[cache] serving the stale run list", flush=True)
+            return {"runs": cached.get("runs", []), "cache": "stale", "cache_error": reason}
+
         raise HTTPException(
             status_code=503,
-            detail="Firebase Connection Error",
+            detail=reason if isinstance(exc, HTTPException) else f"Firebase Connection Error: {reason}",
         ) from exc
+
+    cache_write("runs.json", {"cached_at": time.time(), "runs": runs})
+    return {"runs": runs, "cache": "live"}
 
 
 @app.get("/api/validation/runs/{session_id}/telemetry")
@@ -731,9 +827,19 @@ def validation_telemetry(session_id: str):
             detail="Invalid session ID",
         )
 
-    db = firestore_client()
+    name = telemetry_cache_name(session_id)
+    cached = cache_read(name)
+
+    # A finished run never changes: serve it without touching Firestore.
+    if cached and cached.get("complete"):
+        return {
+            "session_id": session_id,
+            "telemetry": cached.get("telemetry", []),
+            "cache": "complete",
+        }
 
     try:
+        db = firestore_client()
         telemetry = []
 
         query = (
@@ -748,16 +854,38 @@ def validation_telemetry(session_id: str):
             data.setdefault("id", document.id)
             telemetry.append(data)
 
-        return {
-            "session_id": session_id,
-            "telemetry": telemetry,
-        }
+        complete = session_is_finished(db, session_id)
 
     except Exception as exc:
+        reason = exc.detail if isinstance(exc, HTTPException) else f"{type(exc).__name__}: {exc}"
+        print(f"[firestore] telemetry failed for {session_id}: {reason}", flush=True)
+
+        if cached:
+            print(f"[cache] serving stale telemetry for {session_id}", flush=True)
+            return {
+                "session_id": session_id,
+                "telemetry": cached.get("telemetry", []),
+                "cache": "stale",
+                "cache_error": reason,
+            }
+
         raise HTTPException(
             status_code=503,
-            detail="Firebase Connection Error",
+            detail=reason if isinstance(exc, HTTPException) else f"Firebase Connection Error: {reason}",
         ) from exc
+
+    cache_write(name, {
+        "cached_at": time.time(),
+        "session_id": session_id,
+        "complete": complete,
+        "telemetry": telemetry,
+    })
+
+    return {
+        "session_id": session_id,
+        "telemetry": telemetry,
+        "cache": "live" if complete else "live-running",
+    }
 
 
 

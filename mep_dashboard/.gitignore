@@ -2,3 +2,4 @@
 .browsers/
 __pycache__/
 *.pyc
+.cache/
