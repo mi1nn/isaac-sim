@@ -322,3 +322,44 @@ def test_reference_never_runs_away_from_the_measured_tip():
         ref = tr.step(ref, tip, np.zeros(3), np.zeros(3), des, np.zeros(3), np.zeros(3), DT).ref
     assert np.linalg.norm(ref.pos - tip.pos) <= 0.02 + 1e-12
     assert math.degrees(np.linalg.norm(cd.so3_log(ref.rot @ tip.rot.T))) <= 1.0 + 1e-9
+
+
+######################################
+### MRV plume scan (post-docking) ###
+######################################
+
+_mrv = importlib.import_module(f"{_PKG}.mrv_approach")
+
+
+def _box_triangles(half):
+    """Closed box mesh (12 triangles) centred at the origin, half extents `half`."""
+    hx, hy, hz = half
+    v = np.array([[sx * hx, sy * hy, sz * hz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+    faces = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    return np.array([[v[a], v[b], v[c]] for a, b, c, d in faces for a, b, c in ((a, b, c), (a, c, d))])
+
+
+def _vfx():
+    vfx = object.__new__(_mrv.ThrusterVfx)
+    vfx.cfg = _mrv.MrvApproachCfg()
+    vfx.cluster_centre = np.zeros(3)
+    vfx.cluster_half = np.array([2.0, 1.5, 1.5])
+    vfx._fire_anchor_cache = {}
+    vfx._hull_tris = _box_triangles([2.5, 2.0, 2.0])
+    return vfx
+
+
+def test_plume_scan_runs_once_per_face_not_per_direction(monkeypatch):
+    """Station keeping after the docking turns the thrust by fractions of a degree every
+    step; that must not re-scan the hull (it stalled the simulation at ROBOT_RELEASE)."""
+    calls = []
+    real = _mrv._wall_anchors
+    monkeypatch.setattr(_mrv, "_wall_anchors", lambda noz, d, tris, *a, **k: calls.append(np.array(d)) or real(noz, d, tris, *a, **k))
+    vfx, hull = _vfx(), Frame(np.zeros(3), np.eye(3))
+    ref = vfx.fire_anchors(np.array([1.0, 0.0, 0.0]), hull)
+    for i in range(50):  # the measured post-docking wobble: up to ~0.03 off-axis
+        tilted = vfx.fire_anchors(np.array([1.0, -0.028 * math.sin(i), 0.01 * math.cos(i)]), hull)
+        assert np.allclose([p for p, _ in tilted], [p for p, _ in ref])
+    assert len(calls) == 1 and np.allclose(calls[0], [1.0, 0.0, 0.0])  # scanned along the axis (fast path)
+    vfx.fire_anchors(np.array([-1.0, 0.02, 0.0]), hull)  # the opposite face: its own single scan
+    assert len(calls) == 2

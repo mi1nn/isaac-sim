@@ -444,6 +444,9 @@ docking_control:
   max_reference_lead_m: 0.10
   max_reference_lead_deg: 5.0
   max_axial_lead_m: 0.05
+  # inside the nozzle (a set point far ahead of a blocked tip pushes the client and the MRV
+  # station keeping follows); DOCK_READY freezes the set point at the tip
+  max_axial_lead_inside_m: 0.01
   # Soft gate: approach speed x 1 below the full_* errors, x 0 at the zero_* errors
   soft_gate_full_position_m: 0.01
   soft_gate_zero_position_m: 0.08

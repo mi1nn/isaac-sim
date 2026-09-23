@@ -2227,9 +2227,14 @@ class VisionCaptureDemo:
         """Every docking condition is re-checked here; only then is the joint created."""
         d = self.cfg.docking
         if self.coupled:
-            cm = self._cd_last  # soft-gated insertion speed, as in FINAL_INSERTION
-            self.coupled_track(cm, self._advance_axial(cm, d.insertion_speed_mps * cm["scale"]),
-                               max_step=0.5 * self.cfg.approach.max_joint_step_rad)
+            # The docking conditions already hold the tip at the dock point: keep it there
+            # relative to the client (axial set point frozen at the tip on entry) instead
+            # of pressing on towards 0 -- pressing pushed the client and the MRV followed
+            cm = self._cd_last
+            if not self._dock.get("cd_ready_axial_frozen"):
+                self._dock["cd_ready_axial_frozen"] = True
+                self._cd_axial = cm["axial"]
+            self.coupled_track(cm, self._hold_axial(cm), max_step=0.5 * self.cfg.approach.max_joint_step_rad)
         else:
             self.track_probe(probe_dock.tip_goal(self.dock_world(), 0.0), d.insertion_speed_mps,
                              max_step=0.5 * self.cfg.approach.max_joint_step_rad)
@@ -2327,7 +2332,7 @@ class VisionCaptureDemo:
             "dock_pred": coupled_dock.predict_body_frame(dock, com, v_com, w_c, T),
             "v_port": v_port, "v_tip": v_tip, "w_tip": w_tip, "rel_v": rel_v, "rel_w": rel_w,
             "rel_speed": float(np.linalg.norm(rel_v)), "rel_rate_deg_s": math.degrees(float(np.linalg.norm(rel_w))),
-            **ge,
+            "insertion_depth": m["insertion_depth"], **ge,
         }
         cm["scale"] = coupled_dock.alignment_scale(c, cm["lateral"], cm["orientation_deg"])
         self._cd_metrics.update(self.sim_time, self.state.value, cm["lateral"], cm["orientation_deg"], cm["rel_speed"],
@@ -2345,9 +2350,12 @@ class VisionCaptureDemo:
 
     def _advance_axial(self, cm, speed: float) -> float:
         """Axial set point moved towards the dock point at `speed` [m/s] RELATIVE to the
-        client, never more than `max_axial_lead_m` ahead of the measured tip."""
+        client, never more than `max_axial_lead_m` (inside the nozzle
+        `max_axial_lead_inside_m`) ahead of the measured tip."""
+        c = self.cfg.docking_control
         old = self._hold_axial(cm)
-        new = min(0.0, old + max(0.0, speed) * self.dt, cm["axial"] + self.cfg.docking_control.max_axial_lead_m)
+        lead = c.max_axial_lead_inside_m if cm["insertion_depth"] > 0.0 else c.max_axial_lead_m
+        new = min(0.0, old + max(0.0, speed) * self.dt, cm["axial"] + lead)
         self._cd_axial, self._cd_axial_rate = new, (new - old) / self.dt
         return new
 

@@ -88,6 +88,10 @@ class DockingControlCfg:
     # Z_APPROACH: the axial set point advances at the gated speed, never more than this
     # ahead of the measured axial position [m]
     max_axial_lead_m: float = 0.05
+    # ... and inside the nozzle: a set point far ahead of a tip that touches the nozzle
+    # pushes the client (measured: +0.2 mm/s on the 578 t client in 0.3 s of DOCK_READY,
+    # which made the MRV station keeping accelerate). DOCK_READY freezes it at the tip.
+    max_axial_lead_inside_m: float = 0.01
     # Soft approach gate on the measured tip: full approach speed below the `full_*`
     # errors, zero at / above the `zero_*` errors, smooth in between (product of both)
     soft_gate_full_position_m: float = 0.01
@@ -129,7 +133,7 @@ def validate_docking_control_cfg(c: DockingControlCfg, a: DockingAlignmentCfg):
         if getattr(c, name) < 0.0:
             raise ValueError(f"docking_control.{name} must be >= 0")
     for name in ("max_correction_speed_mps", "max_correction_rate_deg_s", "max_accel_mps2", "max_angular_accel_deg_s2",
-                 "max_reference_lead_m", "max_reference_lead_deg", "max_axial_lead_m"):
+                 "max_reference_lead_m", "max_reference_lead_deg", "max_axial_lead_m", "max_axial_lead_inside_m"):
         if not getattr(c, name) > 0.0:
             raise ValueError(f"docking_control.{name} must be > 0")
     if not 0.0 <= c.tip_feedback_weight <= 1.0:

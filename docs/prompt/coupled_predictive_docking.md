@@ -113,7 +113,7 @@ rot = interp(prev.rot → goal.rot, align_speed_deg_s)                     # 현
 ## 3. 변경 항목별 근거
 
 ### 3.1 미래 docking pose 예측
-구현: `coupled_dock.py` `predict_body_frame`(208행)
+구현: `coupled_dock.py` `predict_body_frame`(212행)
 
 ```
 R_dock(t+T) = Exp([ω] T) · R_dock(t)
@@ -126,7 +126,7 @@ p_dock(t+T) = c + v_c T + Exp([ω] T) · (p_dock(t) − c)        c = client CoM
 - 검증: `test_prediction_of_a_tumbling_port_follows_the_circle_about_the_com`
 
 ### 3.2 자세 오차: 회전 벡터
-구현: `pose_error`(244행), `so3_log`(180행)
+구현: `pose_error`(248행), `so3_log`(184행)
 
 - `e_R = Log(R_d · R_c^T)`는 최소 회전 벡터입니다. 크기가 곧 오차 각도이고, 방향이 회전축입니다.
 - Euler 뺄셈은 ±180° 경계에서 불연속이고 짐벌락이 있습니다.
@@ -134,7 +134,7 @@ p_dock(t+T) = c + v_c T + Exp([ω] T) · (p_dock(t) − c)        c = client CoM
 - Euler 값(`rpy_errors_deg`)은 기존처럼 로그 표시용으로만 남습니다.
 
 ### 3.3 Coupled PD 추종기
-구현: `CoupledPoseTracker.step`(423행)
+구현: `CoupledPoseTracker.step`(427행)
 
 ```
 D     = 예측 dock 축 위의 원하는 tip pose (t+T)
@@ -190,7 +190,7 @@ v_cmd = v_D + clip(Kp_p · e_p) − Kd_p · (v_tip − v_D)
 - 검증: `test_prediction_horizon_reduces_the_tracking_error_of_a_tumbling_client`
 
 ### 3.4 Soft gate와 비상 정지
-구현: `alignment_scale`(276행), `emergency_stop`(282행), `step_coupled_approach`(2425행)
+구현: `alignment_scale`(280행), `emergency_stop`(286행), `step_coupled_approach`(2433행)
 
 ```
 scale = ramp(lateral; 10 mm → 80 mm) × ramp(orientation; 1° → 7°)     (smoothstep)
@@ -216,7 +216,7 @@ speed = approach_speed(remaining) × scale
 - 검증: `test_soft_gate_is_continuous_and_monotonic`, `test_emergency_stop_only_on_unsafe_states`
 
 ### 3.5 조건 + 유지 시간 기반 `ALIGNMENT_CHECK`
-구현: `AlignmentGate.entry`(334행), `step_coupled_alignment_check`(2394행)
+구현: `AlignmentGate.entry`(338행), `step_coupled_alignment_check`(2402행)
 
 ```
 lateral < 0.05 m  AND  자세 < 4°  AND  |v_rel| < 0.02 m/s  AND  |ω_rel| < 1°/s
@@ -231,7 +231,7 @@ lateral < 0.05 m  AND  자세 < 4°  AND  |v_rel| < 0.02 m/s  AND  |ω_rel| < 1�
 - 검증: `test_alignment_needs_the_stable_duration_not_one_step`, `test_alignment_stable_interval_restarts_when_a_condition_breaks`
 
 ### 3.6 Rollback hysteresis
-구현: `AlignmentGate.rollback`(345행), `validate_docking_control_cfg`(122행)
+구현: `AlignmentGate.rollback`(349행), `validate_docking_control_cfg`(126행)
 
 ```
 진입:  lateral < 0.05 m,  자세 < 4°
@@ -245,7 +245,7 @@ lateral < 0.05 m  AND  자세 < 4°  AND  |v_rel| < 0.02 m/s  AND  |ω_rel| < 1�
 - 검증: `test_rollback_hysteresis_ignores_noise_between_the_thresholds`, `test_config_defaults_keep_legacy_and_validate_thresholds`
 
 ### 3.7 상대속도: pose 차분
-구현: `TwistEstimator`(356행)
+구현: `TwistEstimator`(360행)
 
 - 연속한 tip pose에서 `v = Δp/Δt`, `ω = Log(R_k R_{k-1}^T)/Δt`를 구하고 저역통과(τ = 0.1 s)합니다.
 - 1.5절의 PhysX 속도 문제를 피합니다. pose는 이동하는 MRV에서도 정확합니다.
@@ -317,7 +317,7 @@ python3 project/scripts/compare_docking_control.py \
 
 | 항목 | 결과 |
 |---|---|
-| `tests/test_coupled_dock.py` (신규) | 24 / 24 통과 |
+| `tests/test_coupled_dock.py` (신규) | 25 / 25 통과 (9절 회귀 테스트 포함) |
 | `test_probe_dock.py`, `test_moving_dock.py`, `test_astrobee_observer.py` (기존) | 전부 통과 |
 | `test_vision_math.py` | 26 통과, 4 실패. 변경 전 코드에서도 같은 4개가 실패합니다(기본 설정 기대값이 오래됨, cv2 버전). |
 
@@ -376,13 +376,6 @@ python3 project/scripts/compare_docking_control.py \
 | 변경 전 코드로 한 legacy 기준 실행 | 미실행 |
 | 전체 파이프라인(`full_6dof`) coupled 모드 | 미실행 |
 
----|---|
-| `tests/test_coupled_dock.py` (신규) | 24 / 24 통과 |
-| `test_probe_dock.py`, `test_moving_dock.py`, `test_astrobee_observer.py` (기존) | 전부 통과 |
-| `test_vision_math.py` | 26 통과, 4 실패. 변경 전 코드에서도 같은 4개가 실패합니다(기본 설정 기대값이 오래됨, cv2 버전). |
-| Isaac `--dock_only` legacy | 진행 중. 첫 실행은 시뮬레이터를 쓰는 테스트와 동시에 돌려 carb mutex assertion으로 중단됐고, 단독으로 다시 실행하고 있습니다. |
-| Isaac `--dock_only` coupled_predictive | 대기 |
-| Isaac 전체 파이프라인(`full_6dof`) | 미실행 |
 
 ---
 
@@ -404,7 +397,41 @@ python3 project/scripts/compare_docking_control.py \
 | `project/srb/tasks/manipulation/debris_capture/vision_capture_demo.py` | 새 상태, coupled step 함수, 로깅, 결과 metric |
 | `project/srb/tasks/manipulation/debris_capture/vision.py` | 설정 섹션 등록과 검증 |
 | `project/srb/tasks/manipulation/debris_capture/probe_dock.py` | `PHASES`에 새 상태 추가 |
+| `project/srb/tasks/manipulation/debris_capture/mrv_approach.py` | 플룸 스캔 캐시를 분사 면 단위로 변경(9절) |
 | `project/config/vision_capture.yaml` | `docking_control:`, `docking_alignment:` (기본 `mode: legacy`) |
-| `project/tests/test_coupled_dock.py` | 신규. 오프라인 테스트 24개 |
+| `project/tests/test_coupled_dock.py` | 신규. 오프라인 테스트 25개 |
 | `project/scripts/compare_docking_control.py` | 신규. 모드별 비교표 |
 | `mep_dashboard/backend/app.py`, `mep_dashboard/frontend/js/validation.js` | 새 상태를 "도킹 준비" 단계에 매핑 |
+
+---
+
+## 9. 이슈: 도킹 후 MRV가 물러나지 않고 시뮬레이션이 멈춤 (2026-09-23)
+
+### 증상
+- 실행: `~/isaac-sim/python.sh project/scripts/vision_capture.py --set docking_control.mode=coupled_predictive` (GUI, 전체 파이프라인)
+- coupled 모드로 도킹에 성공했습니다(`docking_success=True`, 도킹 시간 114 s, 도킹 시점 tip 오차 20.9 mm / 0.08°, 상대속도 2.3 mm/s).
+- 하지만 `DOCKED → ROBOT_RELEASE`(sim t=188.2 s) 뒤로 MRV가 분리되지 않았고, Ctrl+C로 종료했습니다(`MOVE4~6: not reached`).
+
+### 원인
+1. **sim 시간이 188.2 s에서 멈췄습니다.** `full_6dof_moving.csv`(0.1 s 간격)가 `ROBOT_RELEASE` 첫 행에서 끝납니다. 그동안 `[MRV-VFX] exhaust face ...`가 6번 이상 찍혔습니다.
+2. **플룸 배치 스캔이 매 스텝 반복됐습니다.** `ThrusterVfx.fire_anchors`는 선체 벽면 스캔(`_wall_anchors`)을 분사 방향을 소수 셋째 자리까지 반올림한 값으로 캐시했습니다. 방향이 조금만 바뀌어도 다시 스캔했고, 주축에서 벗어난 방향은 13×13 레이를 하나씩 쏘는 느린 경로를 탔습니다.
+3. **방향이 계속 바뀐 이유:** `DOCK_READY` 중 coupled 추종기가 도킹점 쪽으로 계속 밀어 client를 가속시켰습니다(0.3 s 동안 19.46 → 19.68 mm/s). station keeping 중인 MRV가 따라 가속하면서(최대 0.88 mm/s², 방향 `[1, −0.028, 0]`) 플룸 기준값 1e-4 m/s²를 넘었습니다.
+
+| sim t | 상태 | MRV 가속도 | client 속도 |
+|---|---|---|---|
+| ~187.8 s | DOCK_READY | 0 | 19.46 mm/s |
+| 187.9 s | DOCK_READY | 0.32 mm/s² | 19.46 mm/s |
+| 188.1 s | DOCK_READY | 0.88 mm/s² | 19.60 mm/s |
+| 188.2 s | ROBOT_RELEASE | 0.77 mm/s² | 19.68 mm/s |
+
+### 조치
+| 조치 | 파일 | 적용 모드 |
+|---|---|---|
+| 스캔 캐시 키를 분사 면(주축 + 부호)으로 바꾸고, 스캔 방향을 그 주축에 맞춤. 노즐 위치는 원래 면에 의해서만 정해지므로 배치 결과는 같고, 면당 한 번만 빠른 경로로 스캔합니다. | `mrv_approach.py` `fire_anchors` | **모든 모드** (legacy 포함) |
+| `DOCK_READY` 진입 시 축 방향 목표를 측정 tip 위치에 고정하고, 더 밀지 않음 | `vision_capture_demo.py` `step_dock_ready` | coupled_predictive |
+| 노즐 안에서 축 방향 선행량을 5 cm가 아닌 1 cm로 제한(`docking_control.max_axial_lead_inside_m`) | `vision_capture_demo.py` `_advance_axial`, `coupled_dock.py`, `vision_capture.yaml` | coupled_predictive |
+
+### 검증
+- 회귀 테스트 `test_plume_scan_runs_once_per_face_not_per_direction`: 측정된 흔들림(최대 0.028 비축 성분)으로 50번 호출해도 스캔은 1번입니다. **수정 전 코드에서는 실패하고, 수정 후에는 통과합니다.**
+- 오프라인 테스트 69개 통과(`test_coupled_dock.py`, `test_moving_dock.py`, `test_probe_dock.py`).
+- **Isaac 재실행은 아직 하지 않았습니다.** 도킹 후 `ROBOT_RELEASE → MRV_SEPARATION` 전이와 legacy 모드 플룸 표시를 확인해야 합니다.
