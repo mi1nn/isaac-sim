@@ -698,7 +698,12 @@ window.initValidation = async function () {
     selectRun(latest);
 
     const gtCaptureRuns = runs.filter(run => run.hasGtCaptureMetric).length;
-    status(`TECHNOLOGY VALIDATION · FIRESTORE DATA · ${runs.length} RUNS · ${gtCaptureRuns} GT CAPTURE METRIC RUN${gtCaptureRuns === 1 ? '' : 'S'}`);
+    // `cache: stale` means Firestore was unreachable or out of quota and the
+    // server fell back to its last copy -- say so rather than look up to date.
+    const stale = response.cache === 'stale';
+    status(`TECHNOLOGY VALIDATION · ${stale ? 'CACHED DATA (FIRESTORE UNAVAILABLE)' : 'FIRESTORE DATA'}`
+      + ` · ${runs.length} RUNS · ${gtCaptureRuns} GT CAPTURE METRIC RUN${gtCaptureRuns === 1 ? '' : 'S'}`
+      + (stale ? ` · ${response.cache_error || ''}` : ''), stale ? 'warn' : '');
   } catch (error) {
     status(`FIREBASE CONNECTION ERROR · ${error.message}`, 'error');
     ['overall-rate', 'avg-time', 'capture-repeatability', 'docking-accuracy'].forEach(id => { $(id).textContent = 'N/A'; });
