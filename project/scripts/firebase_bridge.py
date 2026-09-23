@@ -51,6 +51,16 @@ FINISHED_STATES: set = set()
 MISSION_STATES = {"MRV_MOVE_STEP_1", "MRV_STEP_1_REACHED", "MRV_MOVE_STEP_2", "MRV_STEP_2_REACHED", "ARM_DEPLOY",
                   "CLIENT_RELEASE", "CLIENT_CRUISE", "CHASE", "VELOCITY_MATCHING", "RENDEZVOUS",
                   "STABILIZING", "STOPPING", "ROBOT_RELEASE", "ARM_RETREAT", "MRV_SEPARATION"}
+# States only reachable once `docking.dock()` created the MEP<->satellite joint
+# (vision_capture_demo.py step_dock_ready: goto(DOCKED) only if `docking.is_docked`).
+# Used as a sticky fallback for `docking_success`: with `post_docking.immediate_release`
+# the DOCKED state can last under one status-publish interval, so the `dock_docked`
+# field itself can go unseen even though docking genuinely succeeded.
+POST_DOCK_STATE_NAMES = {
+    "DOCKED", "DOCK_HOLDING", "STABILIZING", "STOPPING",
+    "ROBOT_RELEASE", "ARM_RETREAT", "MRV_SEPARATION",
+}
+
 # Terminal failure state -> stage of the mission it belongs to (`failure_stage`)
 FAILURE_STAGES = {
     "TAG_LOST": "VISION", "POSE_INVALID": "VISION", "PREDICTION_INVALID": "VISION",
@@ -297,6 +307,7 @@ class SessionRecorder:
         self.poses: Dict[str, Optional[tuple]] = {"ee": None, "gt": None, "goal": None, "est": None, "probe": None, "dock": None}
         self.state: Optional[str] = None
         self.captured = False
+        self.capture_success_ever = False  # sticky: `captured` itself goes false again once the MEP releases
         self._status_captured = False
         self.docked = False
         self.contact_vel: Optional[float] = None
@@ -361,6 +372,7 @@ class SessionRecorder:
                 self.video.open(self.session_id, t)
         if "captured" in s:
             self.captured = bool(s["captured"])
+            self.capture_success_ever = self.capture_success_ever or self.captured
         # Compare with the previous /status, not with /captured (that topic arrives first)
         if self.captured and not self._status_captured:
             self.contact_vel = _num(s.get("est_rel_vel"))  # legacy estimated impact speed
@@ -385,7 +397,7 @@ class SessionRecorder:
                 "target_gap": _num(s.get("capture_target_gap_m")),
             }
         self._status_captured = self.captured
-        self._track_docking(t, s)
+        self._track_docking(t, s, state)
         self.last_status = {**s, "sim_time_s": t, "state": state}
         if t - self.last_row_t >= self.period - 1e-9 or terminal:
             self.last_row_t = t
@@ -393,9 +405,14 @@ class SessionRecorder:
         if terminal:
             self.finish()
 
-    def _track_docking(self, t: float, s: Dict[str, Any]):
+    def _track_docking(self, t: float, s: Dict[str, Any], state: Optional[str] = None):
         self.dock_enabled = self.dock_enabled or bool(s.get("dock_enabled"))
-        docked = bool(s.get("dock_docked"))
+        # `dock_docked` is a momentary flag: with `post_docking.immediate_release` the
+        # DOCKED state can last under one status-publish interval and never appear as
+        # True in any single message, even though docking genuinely succeeded. Reaching
+        # any post-dock state name is only possible after the joint was created, so it
+        # is used as a second, reliable signal alongside the raw field.
+        docked = bool(s.get("dock_docked")) or state in POST_DOCK_STATE_NAMES
         if s.get("dock_active"):
             self.dock_enabled = True
             if not self.docking_started:
@@ -450,6 +467,7 @@ class SessionRecorder:
     def _reset_latest_keep_clock(self):
         self.seq, self.last_row_t, self.contact_vel, self._status_captured, self.docked = 0, -math.inf, None, False, False
         self.dock_enabled = self.docking_started = self.docking_success = False
+        self.capture_success_ever = False
         self.capture_metrics, self.capture_gt_metrics, self.capture_time, self.dock_t0, self.dock_t_end = {}, {}, None, None, None
         self.last_docking_metrics = dict.fromkeys(self.last_docking_metrics)
 
@@ -509,7 +527,10 @@ class SessionRecorder:
             return
         s = self.last_status
         failure = s.get("failure")
-        capture_success = bool(self.captured)
+        # Sticky: `self.captured` reflects the CURRENT grasp and goes false again once
+        # the MEP releases the object during docking/separation, which is the expected
+        # end state of a successful run.
+        capture_success = bool(self.capture_success_ever)
         docking_success = bool(self.docking_success)
         # A capture-only run (no `--dock`) has no docking to fail: docking_success stays null, mission = capture
         mission_success = capture_success and (docking_success if self.dock_enabled else True)
