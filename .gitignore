@@ -295,3 +295,5 @@ serviceAccount*.json
 *-firebase-adminsdk-*.json
 .vscode/settings.json
 graphify*
+graphify
+.vscode/settings.json
