@@ -1,3 +1,11 @@
+# 웹 대시보드 전용. 저장소 전체 목록은 ../requirements.txt 입니다.
+# rclpy / sensor_msgs / std_msgs 는 ROS 2 Jazzy 설치본에서 오므로
+# venv 를 --system-site-packages 로 만들어야 합니다.
 fastapi==0.141.1
 uvicorn==0.53.0
-pillow==10.2.0
+firebase-admin==7.6.0
+numpy>=1.26,<2
+pillow>=10.2
+
+# 검증 전용 (checks/browser_check.py)
+# playwright==1.63.0

@@ -294,6 +294,6 @@ Thumbs.db
 serviceAccount*.json
 *-firebase-adminsdk-*.json
 .vscode/settings.json
+graphify-out/
 graphify*
-graphify
 .vscode/settings.json

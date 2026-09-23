@@ -1,1 +1,0 @@
-{"nodes": [{"id": "pkg_srb", "label": "srb", "file_type": "code", "type": "package", "ecosystem": "cargo", "source_file": "project/crates/srb/Cargo.toml", "source_location": "L1"}], "edges": []}

@@ -1,0 +1,32 @@
+# ============================================================
+# Automated Satellite Mission Extension System
+# ============================================================
+# 모니터링 측(웹 대시보드 + Firestore 브리지) 파이썬 패키지.
+# 시뮬레이션은 Isaac Sim 자체 인터프리터에서 돌기 때문에 이 파일이 필요 없습니다.
+#
+# pip 으로 설치할 수 없는 필수 요소 3가지는 README.md 참고:
+#   1. Isaac Sim 5.x   (~/isaac-sim/python.sh)
+#   2. ROS 2 Jazzy     (rclpy / sensor_msgs / std_msgs / geometry_msgs)
+#   3. ffmpeg          (firebase_bridge.py 의 세션 영상 인코딩)
+#
+#   source /opt/ros/jazzy/setup.bash
+#   python3 -m venv --system-site-packages .venv   # rclpy 를 ROS 2 설치본에서 가져옴
+#   .venv/bin/python -m pip install -r requirements.txt
+# ------------------------------------------------------------
+
+# --- 웹 대시보드: mep_dashboard/backend/app.py ---
+fastapi==0.141.1
+uvicorn==0.53.0
+
+# --- Firestore: app.py + project/scripts/firebase_bridge.py ---
+firebase-admin==7.6.0
+
+# --- ROS 이미지 버퍼와 텔레메트리 연산 ---
+# Ubuntu 24.04 + ROS 2 Jazzy 에는 이미 설치돼 있어(numpy 1.26.4, pillow 10.2.0)
+# --system-site-packages venv 에서는 건너뜁니다. numpy 는 rclpy 와 ABI 를 맞춰야
+# 하므로 2.x 로 올리지 않습니다.
+numpy>=1.26,<2
+pillow>=10.2
+
+# --- 검증 전용, 실행에는 불필요 (mep_dashboard/checks/browser_check.py) ---
+# playwright==1.63.0
