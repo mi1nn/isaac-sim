@@ -46,6 +46,8 @@ MRV(Mission Robotic Vehicle)가 표류하는 MEP(Mission Extension Pod)를 로�
 
 두 PC를 나눠 쓰지 않고 한 대에서 전부 실행해도 됩니다.
 
+<img src ="./docs/image/system_flow.png">
+
 ---
 
 ## 1. 요구 사항

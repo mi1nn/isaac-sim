@@ -8,5 +8,6 @@
 | 4 | [04_scenario.md](04_scenario.md) | 전체 파이프라인, MRV·MEP·Satellite·Astrobee 동작, 실측 결과 |
 | 5 | [05_branch_history.md](05_branch_history.md) | 브랜치 계보와 단계별 개발 이력 |
 | 6 | [06_references_and_improvements.md](06_references_and_improvements.md) | 논문 레퍼런스와 이를 바탕으로 개선한 도킹 제어 |
+| 7 | [07_pipeline_implementation_guide.md](07_pipeline_implementation_guide.md) | 처음 보는 사람을 위한 전체 동작·구현 방식·논문 적용 해설 |
 
 설치·실행은 저장소 루트 [README.md](../README.md) 를 봅니다.
