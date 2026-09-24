@@ -29,7 +29,7 @@ mep:
   # six_dof: the start orientation is also rotated back by Exp(-[w] t) about
   # Cylinder_01, so the MEP turns through the nominal orientation at the same time;
   # the position then passes the nominal only approximately (PhysX rotates the body
-  # about its centre of mass -- see docs/mrv_six_dof_capture.md).
+  # about its centre of mass -- see docs/04_scenario.md).
   rendezvous_time_s: 15.0
   # six_dof only. converge: the MEP turns into the nominal (parallel) orientation at
   # rendezvous_time_s (start orientation rotated back by Exp(-w t)); diverge: it starts in
